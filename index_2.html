@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diamond Fasad — Dashboard</title>
+<style>
+:root{
+  --bg:#0b2138; --bg2:#0f2f4f; --surf:#0f3255; --surf2:#123a5e; --line:#20456b;
+  --ink:#eaf2fb; --muted:#a9c0d6; --faint:#7e97b0;
+  --teal:#4ec9d6; --blue:#3987e5; --green:#199e70; --amber:#c98500; --red:#e0533a;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+  background:var(--bg);background:radial-gradient(1200px 560px at 85% -10%,#153f63,#0b2138 55%);
+  color:var(--ink);line-height:1.45;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1140px;margin:0 auto;padding:22px 16px 60px}
+a{color:var(--teal);text-decoration:none}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.kick{font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--teal);font-weight:700}
+h1{font-size:clamp(21px,3.4vw,30px);font-weight:800;margin:6px 0 3px}
+.sub{color:var(--muted);font-size:13.5px;max-width:640px}
+.upd{color:var(--faint);font-size:12px;margin-top:7px;display:flex;align-items:center;gap:7px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 rgba(25,158,112,.5);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(25,158,112,.5)}70%{box-shadow:0 0 0 8px rgba(25,158,112,0)}100%{box-shadow:0 0 0 0 rgba(25,158,112,0)}}
+.langs{display:flex;gap:4px;background:var(--surf);border:1px solid var(--line);border-radius:9px;padding:3px}
+.langs button{background:none;border:0;color:var(--muted);font:inherit;font-size:12px;font-weight:700;padding:5px 10px;border-radius:6px;cursor:pointer}
+.langs button.on{background:var(--blue);color:#fff}
+h2{font-size:14px;font-weight:800;margin:26px 0 11px;letter-spacing:.02em}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;margin-top:18px}
+.kpi{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:15px 16px}
+.kpi .l{font-size:12px;color:var(--muted);font-weight:600}
+.kpi .b{font-size:31px;font-weight:800;margin-top:5px;line-height:1;font-family:'IBM Plex Mono',ui-monospace,monospace}
+.kpi .n{font-size:11.5px;color:var(--faint);margin-top:6px}
+.alert{background:linear-gradient(90deg,rgba(224,83,58,.16),rgba(224,83,58,.04));border:1px solid #7a3326;border-left:4px solid var(--red);border-radius:12px;padding:13px 16px;margin-top:14px;font-size:13.5px}
+.alert b{color:#ff9985}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+.row{display:grid;grid-template-columns:64px 1fr 128px;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.rlab{font-weight:800;font-size:14px}
+.rlab .m{font-size:11px;color:var(--faint);font-weight:600}
+.bar{position:relative;height:15px;background:#0b2740;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:7px}
+.pct{text-align:right;font-family:'IBM Plex Mono',ui-monospace,monospace;font-weight:800;font-size:13.5px}
+.tag{display:inline-block;font-size:10px;font-weight:800;padding:1px 7px;border-radius:20px;margin-left:7px;vertical-align:middle}
+.tag.crit{background:rgba(224,83,58,.18);color:#ff9985;border:1px solid #7a3326}
+.tag.warn{background:rgba(201,133,0,.18);color:#ffcf7a;border:1px solid #7a5b1e}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}.row{grid-template-columns:52px 1fr 92px}}
+.sys{margin-bottom:9px}
+.sysh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:7px}
+.sysh .nm{font-weight:800;font-size:14px}
+.sysh .me{font-size:11.5px;color:var(--faint)}
+.op{display:grid;grid-template-columns:1fr 88px auto;gap:10px;align-items:center;padding:5px 0;font-size:12.5px}
+.op .on{color:var(--muted)}
+.finrow{display:grid;grid-template-columns:1fr auto;gap:10px;padding:9px 0;border-top:1px solid var(--line);font-size:13px}
+.finrow:first-child{border-top:0}
+.finrow .v{font-family:'IBM Plex Mono',ui-monospace,monospace;font-weight:800}
+.big3{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+@media(max-width:600px){.big3{grid-template-columns:1fr}}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace}
+.note{color:var(--faint);font-size:11.5px;font-style:italic;padding:6px 0}
+footer{margin-top:30px;padding-top:15px;border-top:1px solid var(--line);color:var(--faint);font-size:11.5px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin:8px 0 2px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="top">
+    <div>
+      <div class="kick" id="kick">● JK Diamond · Walter Aluminium</div>
+      <h1 id="h1">Fasad — Boshqaruv paneli</h1>
+      <div class="sub" id="sub">Montaj, bloklar, material va moliya — jonli Google Sheets ma'lumotidan avtomatik.</div>
+      <div class="upd"><span class="dot"></span><span id="upd">Yuklanmoqda…</span></div>
+    </div>
+    <div class="langs">
+      <button data-l="uz" class="on">UZ</button>
+      <button data-l="tr">TR</button>
+      <button data-l="ru">RU</button>
+    </div>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+  <div id="alertBox"></div>
+
+  <h2 id="h_blocks">Bloklar bo'yicha montaj</h2>
+  <div class="legend">
+    <span><i style="background:var(--green)"></i><span data-t="lg_ok">yaxshi</span></span>
+    <span><i style="background:var(--amber)"></i><span data-t="lg_warn">e'tibor</span></span>
+    <span><i style="background:var(--red)"></i><span data-t="lg_crit">orqada</span></span>
+  </div>
+  <div class="card" id="blocks"></div>
+
+  <div class="grid2" style="margin-top:13px">
+    <div>
+      <h2 id="h_crit">Kritik yo'l va to'siq</h2>
+      <div class="card" id="crit"></div>
+    </div>
+    <div>
+      <h2 id="h_fin">Moliya</h2>
+      <div class="card" id="fin"></div>
+    </div>
+  </div>
+
+  <h2 id="h_sys">Tizimlar bo'yicha montaj</h2>
+  <div class="card" id="sys"></div>
+
+  <h2 id="h_debt">Yetkazuvchi qarzlari (ochiq to'lovlar)</h2>
+  <div class="card" id="debt"></div>
+
+  <footer id="foot">Diamond Fasad · avtomatik · manba: Google Sheets (jonli).</footer>
+</div>
+
+<script>
+// ---------- config ----------
+var SHEETS = {
+  bloklar: '1eeAGD7xdC5YHfST7e3lHHidhXDnF8IfIuLd70bFXtcs',
+  montaj:  '1-mCRmMrc3ST58pL-l1Q3w71j1XbTAj7gTzkIHYwY4CE',
+  shart:   '1Xu9nZ2E1eTHRgaJsdL6McMO_VsL0FGeH31cX2Eiwqno',
+  qarz:    '1dieAcZ21DoI5PdgWHMXr-bw0nVw3t5NOIZqSVcDV8Ls'
+};
+var KURS = 463;
+function gvizUrl(id){ return 'https://docs.google.com/spreadsheets/d/'+id+'/gviz/tq?tqx=out:csv'; }
+
+// ---------- i18n ----------
+var L = {
+  uz:{h1:"Fasad — Boshqaruv paneli", sub:"Montaj, bloklar, material va moliya — jonli Google Sheets ma'lumotidan avtomatik.",
+    upd:"Yangilandi", live:"JONLI",
+    kMont:"Montaj (bajarildi)", kMat:"Material (yetkazildi)", kBlok:"Faol bloklar", kDebt:"Ochiq qarz",
+    kMontN:"1-etap, og'irlik bo'yicha", kMatN:"sevkiyat ÷ shartnoma", kBlokN:"ishlayotgan bloklar", kDebtN:"yetkazuvchilarga",
+    h_blocks:"Bloklar bo'yicha montaj", h_crit:"Kritik yo'l va to'siq", h_fin:"Moliya", h_sys:"Tizimlar bo'yicha montaj",
+    h_debt:"Yetkazuvchi qarzlari (ochiq to'lovlar)",
+    lg_ok:"yaxshi", lg_warn:"e'tibor", lg_crit:"orqada", crit:"kritik", warn:"orqada",
+    fContract:"Shartnoma jami", fPaid:"To'langan", fDebt:"Qoldiq qarz", fPct:"To'langan %",
+    bottleneck:"To'siq: MONTAJ (o'rnatish), ta'minot emas — material ({mat}%) montajdan ({mont}%) oldinda.",
+    critPath:"Kritik yo'l: <b>{name}</b> — loyihaning {share}%i, montaj atigi {pct}%. Bu tizim tezlashmasa, muddat xavf ostida.",
+    behind:"Eng orqada: {b}. Ularga e'tibor va resurs kerak.",
+    foot:"Diamond Fasad · avtomatik · manba: Google Sheets (jonli).", noData:"Ma'lumot yuklanmadi.", ki:"ki"},
+  tr:{h1:"Cephe — Yönetim paneli", sub:"Montaj, bloklar, malzeme ve finans — canlı Google Sheets verisinden otomatik.",
+    upd:"Güncellendi", live:"CANLI",
+    kMont:"Montaj (tamamlanan)", kMat:"Malzeme (sevk)", kBlok:"Aktif bloklar", kDebt:"Açık borç",
+    kMontN:"1. etap, ağırlığa göre", kMatN:"sevkiyat ÷ sözleşme", kBlokN:"çalışan bloklar", kDebtN:"tedarikçilere",
+    h_blocks:"Bloklara göre montaj", h_crit:"Kritik yol ve darboğaz", h_fin:"Finans", h_sys:"Sistemlere göre montaj",
+    h_debt:"Tedarikçi borçları (açık ödemeler)",
+    lg_ok:"iyi", lg_warn:"dikkat", lg_crit:"geride", crit:"kritik", warn:"geride",
+    fContract:"Toplam sözleşme", fPaid:"Ödenen", fDebt:"Kalan borç", fPct:"Ödenen %",
+    bottleneck:"Darboğaz: MONTAJ (kurulum), tedarik değil — malzeme ({mat}%) montajın ({mont}%) önünde.",
+    critPath:"Kritik yol: <b>{name}</b> — projenin %{share}'i, montaj sadece %{pct}. Bu sistem hızlanmazsa süre riskte.",
+    behind:"En geride: {b}. Dikkat ve kaynak gerekiyor.",
+    foot:"Diamond Fasad · otomatik · kaynak: Google Sheets (canlı).", noData:"Veri yüklenemedi.", ki:"kişi"},
+  ru:{h1:"Фасад — Панель управления", sub:"Монтаж, блоки, материал и финансы — автоматически из живых Google Sheets.",
+    upd:"Обновлено", live:"ЖИВОЙ",
+    kMont:"Монтаж (выполнено)", kMat:"Материал (отгружено)", kBlok:"Активные блоки", kDebt:"Открытый долг",
+    kMontN:"1-й этап, по весу", kMatN:"отгрузка ÷ договор", kBlokN:"работающие блоки", kDebtN:"поставщикам",
+    h_blocks:"Монтаж по блокам", h_crit:"Критический путь и узкое место", h_fin:"Финансы", h_sys:"Монтаж по системам",
+    h_debt:"Долги поставщикам (открытые платежи)",
+    lg_ok:"хорошо", lg_warn:"внимание", lg_crit:"отстаёт", crit:"критично", warn:"отстаёт",
+    fContract:"Всего договор", fPaid:"Оплачено", fDebt:"Остаток долга", fPct:"Оплачено %",
+    bottleneck:"Узкое место: МОНТАЖ (установка), не поставка — материал ({mat}%) опережает монтаж ({mont}%).",
+    critPath:"Критический путь: <b>{name}</b> — {share}% проекта, монтаж всего {pct}%. Если система не ускорится — срок под угрозой.",
+    behind:"Больше всех отстают: {b}. Нужны внимание и ресурсы.",
+    foot:"Diamond Fasad · авто · источник: Google Sheets (живой).", noData:"Данные не загружены.", ki:"чел"}
+};
+var lang='uz';
+var DATA={};
+
+// ---------- helpers ----------
+function num(x){ if(x==null) return 0; var s=String(x).replace(/\s/g,'').replace(/[^0-9,.\-]/g,''); if(s.indexOf(',')>=0 && s.indexOf('.')>=0){ s=s.replace(/\./g,'').replace(',','.'); } else { s=s.replace(',','.'); } var n=parseFloat(s); return isFinite(n)?n:0; }
+function fmt(n){ n=Math.round(n); return String(n).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
+function f1(n){ return (Math.round(n*10)/10).toString(); }
+function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function parseCSV(text){
+  var rows=[],row=[],cur='',q=false;
+  for(var i=0;i<text.length;i++){ var c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else { if(c==='"')q=true; else if(c===','){row.push(cur);cur='';} else if(c==='\n'){row.push(cur);rows.push(row);row=[];cur='';} else if(c==='\r'){} else cur+=c; }
+  }
+  if(cur.length||row.length){ row.push(cur); rows.push(row); }
+  return rows;
+}
+function fetchSheet(id){ return fetch(gvizUrl(id)).then(function(r){return r.text();}).then(function(t){return parseCSV(t);}); }
+function statusColor(p){ if(p>=70)return 'var(--green)'; if(p>=30)return 'var(--blue)'; if(p>=8)return 'var(--amber)'; return 'var(--red)'; }
+
+// ---------- render ----------
+function render(){
+  var T=L[lang];
+  document.documentElement.lang=lang;
+  document.getElementById('h1').textContent=T.h1;
+  document.getElementById('sub').textContent=T.sub;
+  document.getElementById('h_blocks').textContent=T.h_blocks;
+  document.getElementById('h_crit').textContent=T.h_crit;
+  document.getElementById('h_fin').textContent=T.h_fin;
+  document.getElementById('h_sys').textContent=T.h_sys;
+  document.getElementById('h_debt').textContent=T.h_debt;
+  document.getElementById('foot').textContent=T.foot;
+  [].forEach.call(document.querySelectorAll('[data-t]'),function(e){ e.textContent=T[e.getAttribute('data-t')]; });
+  var today=new Date().toISOString().slice(0,10);
+  document.getElementById('upd').innerHTML=T.live+' · '+T.upd+': '+today;
+
+  // KPIs
+  var mont=DATA.montOverall||0, mat=DATA.matOverall||0, activeB=DATA.activeBlocks||0, debt=DATA.debtTotal||0;
+  document.getElementById('kpis').innerHTML=[
+    kpiHtml(T.kMont, f1(mont)+'%', T.kMontN, 'var(--blue)'),
+    kpiHtml(T.kMat, f1(mat)+'%', T.kMatN, 'var(--green)'),
+    kpiHtml(T.kBlok, activeB, T.kBlokN, 'var(--teal)'),
+    kpiHtml(T.kDebt, fmt(debt/1e6)+'M ₸', T.kDebtN, 'var(--amber)')
+  ].join('');
+
+  // Alert (bottleneck + critical path)
+  var ab='';
+  if(mat>mont+1){ ab+='<div class="alert">'+T.bottleneck.replace('{mat}',f1(mat)).replace('{mont}',f1(mont))+'</div>'; }
+  if(DATA.crit){ ab+='<div class="alert">'+T.critPath.replace('{name}',esc(DATA.crit.name)).replace('{share}',f1(DATA.crit.share)).replace('{pct}',f1(DATA.crit.pct))+'</div>'; }
+  document.getElementById('alertBox').innerHTML=ab;
+
+  // Blocks
+  var blk=DATA.blocks||[];
+  document.getElementById('blocks').innerHTML = blk.length? blk.map(function(b){
+    var c=statusColor(b.progress);
+    var tag = b.progress<8? '<span class="tag crit">'+T.crit+'</span>' : (b.progress<15?'<span class="tag warn">'+T.warn+'</span>':'');
+    return '<div class="row"><div class="rlab">'+esc(b.blok)+tag+'<div class="m">+'+f1(b.gunluk)+' m²</div></div>'
+      +'<div class="bar"><div class="fill" style="width:'+Math.min(b.progress,100)+'%;background:'+c+'"></div></div>'
+      +'<div class="pct" style="color:'+c+'">'+f1(b.progress)+'%</div></div>';
+  }).join('') : '<div class="note">'+T.noData+'</div>';
+
+  // Critical path card
+  var behindTxt = DATA.behind && DATA.behind.length ? T.behind.replace('{b}', DATA.behind.join(', ')) : '';
+  document.getElementById('crit').innerHTML =
+    (DATA.crit? '<div style="font-size:13px;margin-bottom:8px"><span class="tag crit">'+T.crit+'</span> <b>'+esc(DATA.crit.name)+'</b></div>'
+      +'<div class="finrow"><div>'+T.h_sys.split(' ')[0]+' %</div><div class="v" style="color:var(--red)">'+f1(DATA.crit.pct)+'%</div></div>'
+      +'<div class="finrow"><div>og\'irlik</div><div class="v">'+f1(DATA.crit.share)+'%</div></div>' : '')
+    +(behindTxt?'<div class="note" style="margin-top:8px">'+behindTxt+'</div>':'');
+
+  // Finance
+  var fin=DATA.fin;
+  if(fin){
+    var pct= fin.contract>0? Math.round(fin.paid/fin.contract*100):0;
+    document.getElementById('fin').innerHTML=
+      '<div class="finrow"><div>'+T.fContract+'</div><div class="v">'+fmt(fin.contract)+' ₸</div></div>'
+      +'<div class="finrow"><div>'+T.fPaid+'</div><div class="v" style="color:var(--green)">'+fmt(fin.paid)+' ₸</div></div>'
+      +'<div class="finrow"><div>'+T.fDebt+'</div><div class="v" style="color:var(--amber)">'+fmt(fin.contract-fin.paid)+' ₸</div></div>'
+      +'<div class="bar" style="margin-top:10px"><div class="fill" style="width:'+pct+'%;background:var(--green)"></div></div>'
+      +'<div class="note">'+T.fPct+': '+pct+'%</div>';
+  } else document.getElementById('fin').innerHTML='<div class="note">'+T.noData+'</div>';
+
+  // Systems
+  var sys=DATA.systems||[];
+  document.getElementById('sys').innerHTML = sys.length? sys.map(function(s){
+    var ops=s.ops.map(function(o){
+      var c=statusColor(o.pct);
+      return '<div class="op"><div class="on">'+esc(o.name)+'</div>'
+        +'<div class="bar"><div class="fill" style="width:'+Math.min(o.pct,100)+'%;background:'+c+'"></div></div>'
+        +'<div class="pct mono" style="color:'+c+';min-width:46px">'+f1(o.pct)+'%</div></div>';
+    }).join('');
+    return '<div class="sys"><div class="sysh"><span class="nm">'+esc(s.name)+'</span><span class="me">'+fmt(s.area)+' m² · '+f1(s.share)+'%</span></div>'+ops+'</div>';
+  }).join('<div style="height:1px;background:var(--line);margin:6px 0"></div>') : '<div class="note">'+T.noData+'</div>';
+
+  // Debts
+  var d=DATA.debts||[];
+  document.getElementById('debt').innerHTML = d.length? d.slice(0,12).map(function(x){
+    return '<div class="finrow"><div>'+esc(x.firma)+' <span style="color:var(--faint);font-size:11px">'+esc(x.material)+'</span></div>'
+      +'<div class="v" style="color:var(--amber)">$'+fmt(x.usd)+'</div></div>';
+  }).join('') : '<div class="note">'+T.noData+'</div>';
+}
+function kpiHtml(l,b,n,col){ return '<div class="kpi"><div class="l">'+l+'</div><div class="b" style="color:'+col+'">'+b+'</div><div class="n">'+n+'</div></div>'; }
+
+// ---------- compute ----------
+function compute(){
+  // Blocks
+  var br=DATA.rawBloklar||[]; var blocks=[], jami=0;
+  for(var i=1;i<br.length;i++){ var r=br[i]; if(!r||!r[0]) continue; var id=String(r[0]).trim();
+    if(id.toUpperCase().indexOf('JAMI')>=0){ jami=num(r[2]); continue; }
+    if(/^B\d/i.test(id)) blocks.push({blok:id, progress:num(r[2]), gunluk:num(r[3])});
+  }
+  blocks.sort(function(a,b){return b.progress-a.progress;});
+  DATA.blocks=blocks;
+  DATA.activeBlocks=blocks.filter(function(b){return b.progress>0;}).length;
+  DATA.behind=blocks.filter(function(b){return b.progress<8;}).map(function(b){return b.blok;});
+
+  // Systems (montaj)
+  var mr=DATA.rawMontaj||[]; var map={}, order=[];
+  for(var j=1;j<mr.length;j++){ var row=mr[j]; if(!row||!row[0])continue;
+    var sysn=row[0], area=num(row[1]), share=num(row[2]), op=row[3], contract=num(row[5]), installed=num(row[6]), shipped=num(row[7]);
+    if(!map[sysn]){ map[sysn]={name:sysn,area:area,share:share,ops:[],iw:0,ic:0,sw:0,sc:0}; order.push(sysn); }
+    var m=map[sysn];
+    var pct= contract>0? installed/contract*100:0;
+    m.ops.push({name:op, pct:pct});
+    if(contract>0){ m.iw+=installed; m.ic+=contract; if(shipped){ m.sw+=shipped; m.sc+=contract; } }
+  }
+  var systems=order.map(function(k){ return map[k]; });
+  DATA.systems=systems;
+  // overall montaj = block JAMI (authoritative), fallback weighted
+  var montW=0, montV=0, matW=0, matV=0, crit=null;
+  systems.forEach(function(s){
+    var sp = s.ic>0? s.iw/s.ic*100:0;   // system montaj%
+    var mp = s.sc>0? s.sw/s.sc*100:0;   // system material%
+    montW+=s.share; montV+=s.share*sp;
+    matW+=s.share; matV+=s.share*mp;
+    s._montPct=sp;
+    if(!crit || s.share>crit.share) crit={name:s.name, share:s.share, pct:sp};
+  });
+  // Overall montaj/material: prefer the official synced KPI rows (same source as the
+  // daily Telegram brief) so the dashboard never disagrees with the brief; fall back
+  // to block JAMI / weighted recompute only if those rows are missing.
+  var kpiMont=null, kpiMat=null;
+  var sr=DATA.rawShart||[];
+  for(var k0=0;k0<sr.length;k0++){ var kr=sr[k0]; if(!kr)continue;
+    if(String(kr[0]||'').toLowerCase()==='kpi'){ var kn=String(kr[1]||'').toLowerCase();
+      if(kn==='montaj') kpiMont=num(kr[3]);
+      if(kn==='material') kpiMat=num(kr[3]); } }
+  DATA.montOverall = kpiMont!=null? kpiMont : (jami>0? jami : (montW? montV/montW:0));
+  DATA.matOverall  = kpiMat!=null? kpiMat  : (matW? matV/matW:0);
+  DATA.crit = crit;
+
+  // Finance (Diamond_Shartnoma): 'pul' kpi row — mat col = total contract ₸,
+  // paid col = total paid ₸ (verified: Σ group contracts = mat, Σ group paid = paid).
+  var contract=0, paid=0;
+  for(var k=0;k<sr.length;k++){ var rr=sr[k]; if(!rr)continue; var kind=String(rr[0]||'').toLowerCase(); var name=String(rr[1]||'').toLowerCase();
+    if(kind==='kpi' && name.indexOf('pul')>=0){ contract=num(rr[2]); paid=num(rr[4]); }
+  }
+  if(contract>0) DATA.fin={contract:contract, paid:paid};
+
+  // Debts (Diamond_Qarzdorlik): kanal,firma,material,usd(ming)
+  // Debts (Diamond_Qarzdorlik): kanal,firma,material,usd. The usd column holds actual
+  // US dollars (rents ~$500, catering ~$13,700 confirm the scale) — do NOT scale by 1000.
+  var qr=DATA.rawQarz||[]; var debts=[], dt=0;
+  for(var q=1;q<qr.length;q++){ var d=qr[q]; if(!d||!d[1])continue; var usd=num(d[3]); if(usd<=0)continue; debts.push({firma:d[1], material:d[2]||'', usd:usd}); dt+=usd; }
+  debts.sort(function(a,b){return b.usd-a.usd;});
+  DATA.debts=debts;
+  DATA.debtTotalUsd=dt;
+  DATA.debtTotal=dt*KURS; // ₸ equivalent for the KPI tile
+}
+
+// ---------- boot ----------
+function boot(){
+  Promise.allSettled([
+    fetchSheet(SHEETS.bloklar), fetchSheet(SHEETS.montaj), fetchSheet(SHEETS.shart), fetchSheet(SHEETS.qarz)
+  ]).then(function(res){
+    DATA.rawBloklar = res[0].status==='fulfilled'? res[0].value:[];
+    DATA.rawMontaj  = res[1].status==='fulfilled'? res[1].value:[];
+    DATA.rawShart   = res[2].status==='fulfilled'? res[2].value:[];
+    DATA.rawQarz    = res[3].status==='fulfilled'? res[3].value:[];
+    compute();
+    render();
+  }).catch(function(e){ render(); });
+}
+[].forEach.call(document.querySelectorAll('.langs button'),function(btn){
+  btn.addEventListener('click',function(){
+    document.querySelectorAll('.langs button').forEach(function(b){b.classList.remove('on');});
+    btn.classList.add('on'); lang=btn.getAttribute('data-l'); render();
+  });
+});
+render(); boot();
+setInterval(boot, 300000);
+</script>
+</body>
+</html>
