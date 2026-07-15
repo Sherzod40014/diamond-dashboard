@@ -4246,7 +4246,7 @@ class Component extends DCLogic {
   componentWillUnmount(){ if(this._timer) clearInterval(this._timer); if(this._teamTimer) clearInterval(this._teamTimer); if(this._bgArm) window.removeEventListener('pointerdown', this._bgArm); if(this._fsPlay) document.removeEventListener('fullscreenchange', this._fsPlay); }
   componentDidUpdate(prevProps,prevState){
     if(prevProps.theme!==this.props.theme && this.props.theme && this.props.theme!==this.state.theme) this.setState({ theme:this.props.theme });
-    if(prevState.etap!==this.state.etap || prevState.blocks!==this.state.blocks){ this.animateHero(); return; }
+    if(!prevState || prevState.etap!==this.state.etap || prevState.blocks!==this.state.blocks){ this.animateHero(); return; }
     const ov=this.currentOverall();
     if(ov!==this._prevOverall){ this.animateHero(); }
   }
