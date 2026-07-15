@@ -1794,24 +1794,101 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
-// image-slot custom element (from Diamond design). In served/standalone mode
-// window.omelette is absent, so slots are read-only — viewers just see images.
+// @ds-adherence-ignore -- omelette starter scaffold (raw elements/hex/px by design)
+/* BEGIN USAGE */
+/**
+ * <image-slot> — user-fillable image placeholder.
+ *
+ * Drop this into a deck, mockup, or page wherever you want the user to
+ * supply an image. You control the slot's shape and size; the user fills it
+ * by dragging an image file onto it (or clicking to browse). The dropped
+ * image persists across reloads via a .image-slots.state.json sidecar —
+ * same read-via-fetch / write-via-window.omelette pattern as
+ * design_canvas.jsx, so the filled slot shows on share links, downloaded
+ * zips, and PPTX export. Outside the omelette runtime the slot is read-only.
+ *
+ * The host bridge only allows sidecar writes at the project root, so the
+ * HTML that uses this component is assumed to live at the project root too
+ * (same constraint as design_canvas.jsx).
+ *
+ * Attributes:
+ *   id           Persistence key. REQUIRED for the drop to survive reload —
+ *                every slot on the page needs a distinct id.
+ *   shape        'rect' | 'rounded' | 'circle' | 'pill'   (default 'rounded')
+ *                'circle' applies 50% border-radius; on a non-square slot
+ *                that's an ellipse — set equal width and height for a true
+ *                circle.
+ *   radius       Corner radius in px for 'rounded'.       (default 12)
+ *   mask         Any CSS clip-path value. Overrides `shape` — use this for
+ *                hexagons, blobs, arbitrary polygons.
+ *   fit          object-fit: cover | contain | fill.       (default 'cover')
+ *                With cover (the default) double-clicking the filled slot
+ *                enters a reframe mode: the whole image spills past the mask
+ *                (translucent outside, opaque inside), drag to reposition,
+ *                corner-drag to scale. The crop persists alongside the image
+ *                in the sidecar. contain/fill stay static.
+ *   position     object-position for fit=contain|fill.     (default '50% 50%')
+ *   placeholder  Empty-state caption.                      (default 'Drop an image')
+ *   src          Optional initial/fallback image URL. A user drop overrides
+ *                it; clearing the drop reveals src again.
+ *   credit       Optional attribution text (e.g. 'Photo by Jane Doe on
+ *                Unsplash') shown as a small overlay at the bottom-left of
+ *                the filled slot. It belongs to the src image, so it only
+ *                shows while src is what's displayed — a user-dropped
+ *                image hides it.
+ *   credit-href  Optional link for the credit overlay (e.g. the
+ *                photographer's profile). http(s) URLs only — anything
+ *                else renders the credit as plain text.
+ *
+ * Size and layout come from ordinary CSS on the element — width/height
+ * inline or from a parent grid — so it composes with any layout.
+ *
+ * Usage:
+ *   <image-slot id="hero"   style="width:800px;height:450px" shape="rounded" radius="20"
+ *               placeholder="Drop a hero image"></image-slot>
+ *   <image-slot id="avatar" style="width:120px;height:120px" shape="circle"></image-slot>
+ *   <image-slot id="kite"   style="width:300px;height:300px"
+ *               mask="polygon(50% 0, 100% 50%, 50% 100%, 0 50%)"></image-slot>
+ */
+/* END USAGE */
+
 (() => {
   const STATE_FILE = '.image-slots.state.json';
+  // 2× a ~600px slot in a 1920-wide deck — retina-sharp without making the
+  // sidecar enormous. A 1200px WebP at q=0.85 is ~150-300KB.
   const MAX_DIM = 1200;
+  // Raster formats only. SVG is excluded (can carry script; createImageBitmap
+  // on SVG blobs is inconsistent). GIF is excluded because the canvas
+  // re-encode keeps only the first frame, so an animated GIF would silently
+  // go still — better to reject than surprise.
   const ACCEPT = ['image/png', 'image/jpeg', 'image/webp', 'image/avif'];
+
+  // ── Shared sidecar store ────────────────────────────────────────────────
+  // One fetch + immediate write-on-change for every <image-slot> on the
+  // page. Reads via fetch() so viewing works anywhere the HTML and sidecar
+  // are served together; writes go through window.omelette.writeFile, which
+  // the host allowlists to *.state.json basenames only.
   const subs = new Set();
   let slots = {};
+  // ids explicitly cleared before the sidecar fetch resolved — otherwise
+  // the merge below can't tell "never set" from "just deleted" and would
+  // resurrect the sidecar's stale value.
   const tombstones = new Set();
   let loaded = false;
   let loadP = null;
+
   function load() {
     if (loadP) return loadP;
     loadP = fetch(STATE_FILE)
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => {
+        // Merge: sidecar loses to any in-memory change that raced ahead of
+        // the fetch (drop or clear) so neither is clobbered by hydration.
         if (j && typeof j === 'object') {
           const merged = Object.assign({}, j, slots);
+          // A framing-only write that raced ahead of hydration must not
+          // drop a user image that's only on disk — inherit u from the
+          // sidecar for any in-memory entry that lacks one.
           for (const k in slots) {
             if (merged[k] && !merged[k].u && j[k]) {
               merged[k].u = typeof j[k] === 'string' ? j[k] : j[k].u;
@@ -1826,6 +1903,11 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       .then(() => { loaded = true; subs.forEach((fn) => fn()); });
     return loadP;
   }
+
+  // Serialize writes so two near-simultaneous drops on different slots
+  // can't reorder at the backend and leave the sidecar with only the
+  // first. A save requested mid-flight just marks dirty and re-fires on
+  // completion with the then-current slots.
   let saving = false;
   let saveDirty = false;
   function save() {
@@ -1837,20 +1919,34 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       .catch(() => {})
       .then(() => { saving = false; if (saveDirty) { saveDirty = false; save(); } });
   }
+
   const S_MAX = 5;
   const clampS = (s) => Math.max(1, Math.min(S_MAX, s));
+
+  // Normalize a stored slot value. Pre-reframe sidecars stored a bare
+  // data-URL string; newer ones store {u, s, x, y}. Either shape is valid.
   function getSlot(id) {
     const v = slots[id];
     if (!v) return null;
     return typeof v === 'string' ? { u: v, s: 1, x: 0, y: 0 } : v;
   }
+
   function setSlot(id, val) {
     if (!id) return;
     if (val) { slots[id] = val; tombstones.delete(id); }
     else { delete slots[id]; if (!loaded) tombstones.add(id); }
     subs.forEach((fn) => fn());
+    // A drop is rare + high-value — write immediately so nav-away can't lose
+    // it. Gate on the initial read so we don't overwrite a sidecar we haven't
+    // merged yet; the merge in load() keeps this change once the read lands.
     if (loaded) save(); else load().then(save);
   }
+
+  // ── Image downscale ─────────────────────────────────────────────────────
+  // Encode through a canvas so the sidecar carries resized bytes, not the
+  // raw upload. Longest side is capped at 2× the slot's rendered width
+  // (retina) and at MAX_DIM. WebP keeps alpha and is ~10× smaller than PNG
+  // for photos, so there's no need for per-image format picking.
   async function toDataUrl(file, targetW) {
     const bitmap = await createImageBitmap(file);
     try {
@@ -1866,12 +1962,21 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       bitmap.close && bitmap.close();
     }
   }
+
+  // ── Custom element ──────────────────────────────────────────────────────
   const stylesheet =
     ':host{display:inline-block;position:relative;vertical-align:top;' +
     '  font:13px/1.3 system-ui,-apple-system,sans-serif;color:rgba(0,0,0,.55);width:240px;height:160px}' +
     '.frame{position:absolute;inset:0;overflow:hidden;background:rgba(0,0,0,.04)}' +
+    // .frame img (clipped) and .spill (unclipped ghost + handles) share the
+    // same left/top/width/height in frame-%, computed by _applyView(), so the
+    // inside-mask crop and the outside-mask spill stay pixel-aligned.
     '.frame img{position:absolute;max-width:none;transform:translate(-50%,-50%);' +
     '  -webkit-user-drag:none;user-select:none;touch-action:none}' +
+    // Reframe mode (double-click): the full image spills past the mask. The
+    // spill layer is sized to the IMAGE bounds so its corners are where the
+    // resize handles belong. The ghost <img> inside is translucent; the real
+    // clipped <img> underneath shows the opaque in-mask crop.
     '.spill{position:absolute;transform:translate(-50%,-50%);display:none;z-index:1;' +
     '  cursor:grab;touch-action:none}' +
     ':host([data-panning]) .spill{cursor:grabbing}' +
@@ -1902,6 +2007,9 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
     '  transition:border-color .12s}' +
     ':host([data-over]) .ring{border-color:#c96442}' +
     ':host([data-filled]) .ring{display:none}' +
+    // Controls sit BELOW the mask (top:100%), absolutely positioned so the
+    // author-declared slot height is unaffected. The gap is padding, not a
+    // top offset, so the hover target stays contiguous with the frame.
     '.ctl{position:absolute;top:100%;left:50%;transform:translateX(-50%);padding-top:8px;' +
     '  display:flex;gap:6px;opacity:0;pointer-events:none;transition:opacity .12s;z-index:2;' +
     '  white-space:nowrap}' +
@@ -1919,18 +2027,23 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
     '  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;backdrop-filter:blur(6px)}' +
     '.credit[href]:hover{background:rgba(0,0,0,.8);text-decoration:underline}' +
     ':host([data-filled][data-credit]) .credit{display:block}';
+
   const icon =
     '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
     '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>' +
     '<path d="m21 15-5-5L5 21"/></svg>';
+
   class ImageSlot extends HTMLElement {
     static get observedAttributes() {
       return ['shape', 'radius', 'mask', 'fit', 'position', 'placeholder', 'src', 'id', 'credit', 'credit-href'];
     }
+
     constructor() {
       super();
       const root = this.attachShadow({ mode: 'open' });
+      // .spill and .ctl sit OUTSIDE .frame so overflow:hidden + border-radius
+      // on the frame (circle, pill, rounded) can't clip them.
       root.innerHTML =
         '<style>' + stylesheet + '</style>' +
         '<div class="frame" part="frame">' +
@@ -1940,6 +2053,8 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         '    <div class="sub">or <u>browse files</u></div></div>' +
         '  <div class="ring" part="ring"></div>' +
         '</div>' +
+        // Outside .frame, like .spill/.ctl — the frame's overflow:hidden +
+        // border-radius/clip-path would cut the credit off on circle/pill/mask.
         '<a class="credit" part="credit" target="_blank" rel="noopener noreferrer"></a>' +
         '<div class="spill">' +
         '  <img class="ghost" alt="" draggable="false">' +
@@ -1957,6 +2072,7 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._sub = root.querySelector('.sub');
       this._spill = root.querySelector('.spill');
       this._credit = root.querySelector('.credit');
+      // Credit clicks open the link, not browse/reframe.
       this._credit.addEventListener('click', (e) => e.stopPropagation());
       this._credit.addEventListener('dblclick', (e) => e.stopPropagation());
       this._ghost = root.querySelector('.ghost');
@@ -1966,6 +2082,8 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._gen = 0;
       this._view = { s: 1, x: 0, y: 0 };
       this._subFn = () => this._render();
+      // Shadow-DOM listeners live with the shadow DOM — bound once here so
+      // disconnect/reconnect (e.g. React remount) doesn't stack handlers.
       this._empty.addEventListener('click', () => this._input.click());
       root.addEventListener('click', (e) => {
         const act = e.target && e.target.getAttribute && e.target.getAttribute('data-act');
@@ -1982,13 +2100,21 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         if (f) this._ingest(f);
         this._input.value = '';
       });
+      // naturalWidth/Height aren't known until load — re-apply so the cover
+      // baseline is computed from real dimensions, not the 100%×100% fallback.
       this._img.addEventListener('load', () => this._applyView());
+      // Gated on editable + fit=cover so share links and contain/fill slots
+      // stay static.
       this.addEventListener('dblclick', (e) => {
         if (!this.hasAttribute('data-editable') || !this._reframes()) return;
         e.preventDefault();
         if (this.hasAttribute('data-reframe')) this._exitReframe(true);
         else this._enterReframe();
       });
+      // Pan + resize both originate on the spill layer. A handle pointerdown
+      // drives an aspect-locked resize anchored at the opposite corner; any
+      // other pointerdown on the spill pans. Offsets are frame-% so a
+      // reframed slot survives responsive resize / PPTX export.
       this._spill.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 || !this.hasAttribute('data-reframe')) return;
         e.preventDefault();
@@ -1999,6 +2125,9 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         const corner = e.target.getAttribute && e.target.getAttribute('data-c');
         let move;
         if (corner) {
+          // Resize about the OPPOSITE corner. Viewport-px throughout (rect
+          // fw/fh, not clientWidth) so the math survives a transform:scale()
+          // ancestor — deck_stage renders slides scaled-to-fit.
           const iw = this._img.naturalWidth || 1, ih = this._img.naturalHeight || 1;
           const base = Math.max(fw / iw, fh / ih);
           const sx = corner.includes('e') ? 1 : -1;
@@ -2032,18 +2161,22 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
           };
         }
         const up = () => {
-          try { this._spill.releasePointerCapture(e.pointerId); } catch (err) {}
+          try { this._spill.releasePointerCapture(e.pointerId); } catch {}
           this._spill.removeEventListener('pointermove', move);
           this._spill.removeEventListener('pointerup', up);
           this._spill.removeEventListener('pointercancel', up);
           this.removeAttribute('data-panning');
           this._dragUp = null;
         };
+        // Stashed so _exitReframe (Escape / outside-click mid-drag) can
+        // tear the capture + listeners down synchronously.
         this._dragUp = up;
         this._spill.addEventListener('pointermove', move);
         this._spill.addEventListener('pointerup', up);
         this._spill.addEventListener('pointercancel', up);
       });
+      // Wheel zoom stays available inside reframe mode as a trackpad nicety —
+      // zooms toward the cursor (offset' = cursor·(1-k) + offset·k).
       this.addEventListener('wheel', (e) => {
         if (!this.hasAttribute('data-reframe')) return;
         e.preventDefault();
@@ -2061,7 +2194,10 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         this._applyView();
       }, { passive: false });
     }
+
     connectedCallback() {
+      // Warn once per page — an id-less slot works for the session but
+      // cannot persist, and two id-less slots would share nothing.
       if (!this.id && !ImageSlot._warned) {
         ImageSlot._warned = true;
         console.warn('<image-slot> without an id will not persist its dropped image.');
@@ -2071,11 +2207,18 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this.addEventListener('dragleave', this);
       this.addEventListener('drop', this);
       subs.add(this._subFn);
+      // width%/height% in _applyView encode the frame aspect at call time —
+      // a host resize (responsive grid, pane divider) would stretch the
+      // image until the next _render. Re-render on size change: _render()
+      // re-seeds _view from stored before clamp/apply, so a shrink→grow
+      // cycle round-trips instead of ratcheting x/y toward the narrower
+      // frame's clamp range.
       this._ro = new ResizeObserver(() => this._render());
       this._ro.observe(this);
       load();
       this._render();
     }
+
     disconnectedCallback() {
       subs.delete(this._subFn);
       this.removeEventListener('dragenter', this);
@@ -2085,10 +2228,15 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       if (this._ro) { this._ro.disconnect(); this._ro = null; }
       this._exitReframe(false);
     }
+
     _enterReframe() {
       if (this.hasAttribute('data-reframe')) return;
       this.setAttribute('data-reframe', '');
       this._applyView();
+      // Close on click outside (the spill handler stopPropagation()s so
+      // in-image drags don't reach this) and on Escape. Listeners are held
+      // on the instance so _exitReframe / disconnectedCallback can detach
+      // exactly what was attached.
       this._outside = (e) => {
         if (e.composedPath && e.composedPath().includes(this)) return;
         this._exitReframe(true);
@@ -2097,6 +2245,7 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       document.addEventListener('pointerdown', this._outside, true);
       document.addEventListener('keydown', this._esc, true);
     }
+
     _exitReframe(commit) {
       if (!this.hasAttribute('data-reframe')) return;
       if (this._dragUp) this._dragUp();
@@ -2107,15 +2256,22 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._outside = this._esc = null;
       if (commit) this._commitView();
     }
+
     attributeChangedCallback() { if (this.shadowRoot) this._render(); }
+
+    // handleEvent — one listener object for all four drag events keeps the
+    // add/remove symmetric and the depth counter correct.
     handleEvent(e) {
       if (e.type === 'dragenter' || e.type === 'dragover') {
+        // Without preventDefault the browser never fires 'drop'.
         e.preventDefault();
         e.stopPropagation();
         if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
         if (e.type === 'dragenter') this._depth++;
         this.setAttribute('data-over', '');
       } else if (e.type === 'dragleave') {
+        // dragenter/leave fire for every descendant crossing — count depth
+        // so hovering the icon inside the empty state doesn't flicker.
         if (--this._depth <= 0) { this._depth = 0; this.removeAttribute('data-over'); }
       } else if (e.type === 'drop') {
         e.preventDefault();
@@ -2126,20 +2282,28 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         if (f) this._ingest(f);
       }
     }
+
     async _ingest(file) {
       this._setError(null);
       if (!file || ACCEPT.indexOf(file.type) < 0) {
         this._setError('Drop a PNG, JPEG, WebP, or AVIF image.');
         return;
       }
+      // toDataUrl can take hundreds of ms on a large photo. A Clear or a
+      // newer drop during that window would be clobbered when this await
+      // resumes — bump + capture a generation so stale encodes bail.
       const gen = ++this._gen;
       try {
         const w = this.clientWidth || this.offsetWidth || MAX_DIM;
         const url = await toDataUrl(file, w);
         if (gen !== this._gen) return;
+        // Only exit reframe once the new image is in hand — a rejected type
+        // or decode failure leaves the in-progress crop untouched.
         this._exitReframe(false);
         const val = { u: url, s: 1, x: 0, y: 0 };
         setSlot(this.id || '', val);
+        // Keep a session-local copy for id-less slots so the drop still
+        // shows, even though it cannot persist.
         if (!this.id) { this._local = val; this._render(); }
       } catch (err) {
         if (gen !== this._gen) return;
@@ -2147,6 +2311,7 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         console.warn('<image-slot> ingest failed:', err);
       }
     }
+
     _setError(msg) {
       if (this._err) { this._err.remove(); this._err = null; }
       if (!msg) return;
@@ -2156,17 +2321,28 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._err = d;
       setTimeout(() => { if (this._err === d) { d.remove(); this._err = null; } }, 3000);
     }
+
+    // Reframing (pan/resize) is only meaningful for fit=cover — contain/fill
+    // keep the old object-fit path and double-click is a no-op.
     _reframes() {
       return this.hasAttribute('data-filled') &&
         (this.getAttribute('fit') || 'cover') === 'cover';
     }
+
+    // Cover-baseline geometry, shared by clamp/apply/resize. Null until the
+    // img has loaded (naturalWidth is 0 before that) or when the slot has no
+    // layout box — ResizeObserver fires with a 0×0 rect under display:none,
+    // and clamping against a degenerate 1×1 frame would silently pull the
+    // stored pan toward zero.
     _geom() {
       const iw = this._img.naturalWidth, ih = this._img.naturalHeight;
       const fw = this.clientWidth, fh = this.clientHeight;
       if (!iw || !ih || !fw || !fh) return null;
       return { iw, ih, fw, fh, base: Math.max(fw / iw, fh / ih) };
     }
+
     _clampView() {
+      // Pan range on each axis is half the overflow past the frame edge.
       const g = this._geom();
       if (!g) return;
       const mx = Math.max(0, (g.iw * g.base * this._view.s / g.fw - 1) * 50);
@@ -2174,10 +2350,12 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._view.x = Math.max(-mx, Math.min(mx, this._view.x));
       this._view.y = Math.max(-my, Math.min(my, this._view.y));
     }
+
     _applyView() {
       const g = this._geom();
       const fit = this.getAttribute('fit') || 'cover';
       if (fit !== 'cover' || !g) {
+        // Non-cover, or dimensions not known yet (before img load).
         this._img.style.width = '100%';
         this._img.style.height = '100%';
         this._img.style.left = '50%';
@@ -2186,6 +2364,11 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         this._img.style.objectPosition = this.getAttribute('position') || '50% 50%';
         return;
       }
+      // Cover baseline: img fills the frame on its tighter axis at s=1, so
+      // pan works immediately on the overflowing axis without zooming first.
+      // Width/height and left/top are all frame-% — depends only on the
+      // frame aspect ratio, so a responsive resize keeps the same crop. The
+      // spill layer mirrors the same box so its corners = image corners.
       const k = g.base * this._view.s;
       const w = (g.iw * k / g.fw * 100) + '%';
       const h = (g.ih * k / g.fh * 100) + '%';
@@ -2197,13 +2380,21 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._spill.style.width = w; this._spill.style.height = h;
       this._spill.style.left = l; this._spill.style.top = t;
     }
+
     _commitView() {
       const v = { s: this._view.s, x: this._view.x, y: this._view.y };
       if (this._userUrl) v.u = this._userUrl;
+      // Framing-only (no u) persists too so an author-src slot remembers its
+      // crop; clearing the sidecar still falls through to src=.
       if (this.id) setSlot(this.id, v);
       else { this._local = v; }
     }
+
     _render() {
+      // Shape / mask. Presets use border-radius so the dashed ring can
+      // follow the rounded outline; clip-path is only applied for an
+      // explicit `mask` (the ring is hidden there since a rectangle
+      // dashed border chopped by an arbitrary polygon looks broken).
       const mask = this.getAttribute('mask');
       const shape = (this.getAttribute('shape') || 'rounded').toLowerCase();
       let radius = '';
@@ -2217,14 +2408,22 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this._frame.style.clipPath = mask || '';
       this._ring.style.borderRadius = mask ? '' : radius;
       this._ring.style.display = mask ? 'none' : '';
+
+      // Controls and reframe entry gate on this so share links stay read-only.
       const editable = !!(window.omelette && window.omelette.writeFile);
       this.toggleAttribute('data-editable', editable);
       this._sub.style.display = editable ? '' : 'none';
+
+      // Content. The sidecar is also writable by the agent's write_file
+      // tool, so its value isn't guaranteed canvas-originated — only accept
+      // data:image/ URLs from it. The `src` attribute is author-controlled
+      // (Claude wrote it into the HTML) so it passes through unchanged.
       let stored = this.id ? getSlot(this.id) : this._local;
       if (stored && stored.u && !/^data:image\//i.test(stored.u)) stored = null;
       const srcAttr = this.getAttribute('src') || '';
       this._userUrl = (stored && stored.u) || null;
       const url = this._userUrl || srcAttr;
+      // Don't clobber an in-flight reframe with a store-triggered re-render.
       if (!this.hasAttribute('data-reframe')) {
         this._view = {
           s: stored && Number.isFinite(stored.s) ? clampS(stored.s) : 1,
@@ -2233,6 +2432,8 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         };
       }
       this._cap.textContent = this.getAttribute('placeholder') || 'Drop an image';
+      // Toggle via style.display — the [hidden] attribute alone loses to
+      // the display:flex / display:block rules in the stylesheet above.
       if (url) {
         if (this._img.getAttribute('src') !== url) {
           this._img.src = url;
@@ -2250,6 +2451,9 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
         this._empty.style.display = 'flex';
         this.removeAttribute('data-filled');
       }
+
+      // Credit belongs to the author src, so a user drop hides it.
+      // textContent + http(s)-only href keep external strings inert.
       const credit = this.getAttribute('credit');
       const showCredit = !!(url && credit && !this._userUrl);
       if (showCredit) {
@@ -2260,7 +2464,7 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
           try {
             const u = new URL(rawHref, document.baseURI);
             if (u.protocol === 'http:' || u.protocol === 'https:') href = u.href;
-          } catch (e) {}
+          } catch {}
         }
         if (href) this._credit.setAttribute('href', href);
         else this._credit.removeAttribute('href');
@@ -2271,6 +2475,7 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
       this.toggleAttribute('data-credit', showCredit);
     }
   }
+
   if (!customElements.get('image-slot')) {
     customElements.define('image-slot', ImageSlot);
   }
@@ -2900,34 +3105,27 @@ body{margin:0;font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:anti
           <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;color:{{ t.ink }};text-transform:uppercase;margin-bottom:4px;">{{ L.finPlanLocTitle }}</div>
           <div style="font-size:12.5px;color:{{ t.muted }};margin-bottom:14px;">{{ L.finPlanLocSub }}</div>
           <div style="overflow-x:auto;border:1px solid {{ t.line }};border-radius:12px;">
-            <div style="min-width:920px;">
-              <div style="display:grid;grid-template-columns:34px 1.5fr 1.8fr 96px 1fr 1fr 1fr;gap:10px;padding:11px 14px;background:{{ t.surface2 }};border-bottom:1px solid {{ t.line }};font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.05em;color:{{ t.faint }};text-transform:uppercase;">
-                <span>{{ L.colNo }}</span><span>{{ L.fpColComp }}</span><span>{{ L.fpColMat }}</span><span>{{ L.fpColObj }}</span><span style="text-align:right;">{{ L.fpLocP1 }}</span><span style="text-align:right;">{{ L.fpLocP2 }}</span><span style="text-align:right;">{{ L.fpLocP3 }}</span>
+            <div style="min-width:900px;">
+              <div style="display:grid;grid-template-columns:34px 2.2fr 90px 1.15fr 1fr 1fr;gap:10px;padding:11px 14px;background:{{ t.surface2 }};border-bottom:1px solid {{ t.line }};font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.05em;color:{{ t.faint }};text-transform:uppercase;">
+                <span>{{ L.colNo }}</span><span>{{ L.fpColMat }}</span><span>{{ L.fpColObj }}</span><span style="text-align:right;">{{ L.fpLocDebtT }}</span><span style="text-align:right;">{{ L.fpLocDebtU }}</span><span style="text-align:right;">{{ L.fpLocPaid }}</span>
               </div>
               <div style="max-height:440px;overflow-y:auto;">
               <sc-for list="{{ planLocalRows }}" as="r" hint-placeholder-count="8">
-                <div style="display:grid;grid-template-columns:34px 1.5fr 1.8fr 96px 1fr 1fr 1fr;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid {{ t.line }};">
+                <div style="display:grid;grid-template-columns:34px 2.2fr 90px 1.15fr 1fr 1fr;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid {{ t.line }};">
                   <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.faint }};">{{ r.no }}</span>
-                  <span style="font-size:12px;color:{{ t.ink }};font-weight:500;">{{ r.comp }}</span>
-                  <span style="font-size:11.5px;color:{{ t.muted }};">{{ r.material }}</span>
+                  <span style="font-size:12px;color:{{ t.ink }};font-weight:500;">{{ r.material }}</span>
                   <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:{{ t.faint }};">{{ r.obj }}</span>
-                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.warn }};text-align:right;white-space:nowrap;">{{ r.p1 }}</span>
-                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.primary }};text-align:right;white-space:nowrap;">{{ r.p2 }}</span>
-                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.ink }};text-align:right;white-space:nowrap;">{{ r.p3 }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;color:{{ t.warn }};text-align:right;white-space:nowrap;">{{ r.debtT }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.muted }};text-align:right;white-space:nowrap;">{{ r.debtU }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.good }};text-align:right;white-space:nowrap;">{{ r.paid }}</span>
                 </div>
               </sc-for>
               </div>
-              <div style="display:grid;grid-template-columns:34px 1.5fr 1.8fr 96px 1fr 1fr 1fr;gap:10px;align-items:center;padding:14px;background:{{ t.surface2 }};border-top:2px solid {{ t.line }};">
-                <span></span><span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;color:{{ t.ink }};">{{ L.fpTotal }}</span><span></span><span></span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.warn }};text-align:right;white-space:nowrap;">{{ planLocalTot.p1 }}</span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.primary }};text-align:right;white-space:nowrap;">{{ planLocalTot.p2 }}</span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.ink }};text-align:right;white-space:nowrap;">{{ planLocalTot.p3 }}</span>
-              </div>
-              <div style="display:grid;grid-template-columns:34px 1.5fr 1.8fr 96px 1fr 1fr 1fr;gap:10px;align-items:center;padding:11px 14px;background:{{ t.surface2 }};border-top:1px solid {{ t.line }};">
-                <span></span><span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.05em;color:{{ t.faint }};text-transform:uppercase;">{{ L.fpUsd }}</span><span></span><span></span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.muted }};text-align:right;white-space:nowrap;">{{ planLocalUsd.p1 }}</span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.muted }};text-align:right;white-space:nowrap;">{{ planLocalUsd.p2 }}</span>
-                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:{{ t.muted }};text-align:right;white-space:nowrap;">{{ planLocalUsd.p3 }}</span>
+              <div style="display:grid;grid-template-columns:34px 2.2fr 90px 1.15fr 1fr 1fr;gap:10px;align-items:center;padding:14px;background:{{ t.surface2 }};border-top:2px solid {{ t.line }};">
+                <span></span><span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;color:{{ t.ink }};">{{ L.fpTotal }}</span><span></span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.warn }};text-align:right;white-space:nowrap;">{{ planLocalTot.debtT }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.ink }};text-align:right;white-space:nowrap;">{{ planLocalTot.debtU }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;font-weight:700;color:{{ t.good }};text-align:right;white-space:nowrap;">{{ planLocalTot.paid }}</span>
               </div>
             </div>
           </div>
@@ -3307,7 +3505,7 @@ class Component extends DCLogic {
       subDone:'100% tamamlandı', subActive:'işlemde', subDelayYes:'dikkat gerektirir', subDelayNo:'gecikme yok',
       subOverall:(n)=>n+' blok ortalaması', delayFlag:'▲ gecikme',
       connEnter:'Lütfen URL girin.', connConnecting:'Bağlanıyor…', connOk:'✓ Bağlandı. Her 60 sn güncellenir.', connDemo:'Hata — demo veriler gösteriliyor.', statusDemo:'Şu an demo veriler gösteriliyor.',
-      secFinance:'TEDARİK & FİNANS', secFinanceSub:'Malzeme tedariği ve ödeme durumu — gizli bölüm.', finProjTitle:'PROJE TOPLAMI', finProjSub:'Sözleşme türlerine göre tutar ve ödemeler — ₸ ve USD.', finPlanLocTitle:'ÖDEME PLANI — YEREL (₸)', finPlanLocSub:'Yerel tedarikçiler için ödeme planı.', finPlanImpTitle:'ÖDEME PLANI — İTHALAT ($)', finPlanImpSub:'İthalat tedarikçileri için ödeme planı.', fpColComp:'Firma', fpColMat:'Malzeme', fpColObj:'Obje', fpLocP1:'Plan 1 · acil', fpLocP2:'Plan 2 · 10.07', fpLocP3:'Plan 3 · 05.08', fpImpP1:'Plan 1 · 10.07', fpImpP2:'Plan 2 · 05.08', fpTotal:'TOPLAM', fpUsd:'USD olarak', fpContract:'Sözleşme tutarı', fpPaid:'Ödendi', fpDebt:'Borç', finLock:'🔒 Kilitle', finLockedTitle:'Bu bölüm korumalı', finLockedSub:'Finansal verileri görmek için şifre girin.', finPw:'Şifre', finUnlock:'Aç', finWrong:'Hatalı şifre. Tekrar deneyin.', finTotalLbl:'Toplam sözleşme', finPaidLbl:'Ödenen', finRemainLbl:'Kalan', finOrderedLbl:'Sipariş edilen', finContract:'Sipariş', finPaid:'Ödenen', finSupplyTitle:'Malzeme bazında tedarik', finPayPct:'Ödeme %', finDebtTitle:'ÖDENECEK — TEDARİKÇİ BORÇLARI', finDebtSub:'Bize ödeme çıkan tutarlar — firma ve malzeme bazında (₸).', finDebtUsd:'USD karşılığı', finDebtTotalLbl:'Toplam borç', finDebtRowsLbl:'kayıt', colNo:'№', colFirma:'Firma', colMaterial:'Malzeme', colToplam:'Toplam', colOdendi:'Ödendi', colBorc:'BORÇ', finJami:'GENEL TOPLAM', blockPhoto:'Blok fotoğrafı', today:'Bugün', m2:'m²', totalArea:'Toplam alan', montajTitle:'MONTAJ · Metrajlar', gVitraj:'Vitray cephe', gTas:'Taş cephe', total:'Toplam', secEtap:'1. ETAP DURUMU', secEtapSub:'Cephe işleri kırılımı — kategori, metraj ağırlığı ve montaj ilerlemesi (m² / adet).', etapTotal:'Toplam metraj', colProje:'Proje toplam', colMontaj:'Toplam montaj', colProgress:'İlerleme', secDaily:'GÜNLÜK YAPILAN İŞLER', secDailySub:'Hangi blokta bugün ne yapıldı — her gün güncellenir.', secArchive:'GÜNLÜK FOTO ARŞİVİ', secArchiveSub:'Her güne ait saha fotoğrafları. Bugün aktif, önceki günler arşivde.', lblActive:'AKTİF', lblArchive:'ARŞİV', lblToday:'BUGÜN', colBlock:'Blok', colWork:'İş', colDaily:'Bugün', noDaily:'Bugün için montaj kaydı bulunamadı.', archiveNote:'Arşiv günü — saha fotoğrafları. Yapılan iş kayıtları yalnızca aktif (bugün) görünür.', photoAdd:'Foto ekle', secPersonnel:'PERSONEL · GÜNLÜK EKİP', pTeknik:'Teknik Ekip', pSaha:'Saha Ekibi', pFabrika:'Fabrika', pTotal:'GENEL TOPLAM', pPerson:'kişi', pGeneral:'GENEL', secChizma:'ÇİZİM & KONSTRÜKSİYON', secChizmaSub:'Proje / konstrüksiyon bölümü — etap bazında çizim aşamaları (genel).', chEtap:'Etap', chNotStarted:'Başlamadı', chBlocks:'Bloklar', chItems:'kalem', secProject:'PROJE GENELİ · 3 ETAP', lblCizim:'Çizim', lblMontaj:'Montaj', videoBtn:'Video yükle', videoHint:'Video dosyası ekle (sessiz oynar)', musicTitle:'Fon müziği', musicSet:'Müzik dosyası seç', musicNone:'Müzik yok', musicHint:'Fon müziği (mp3) — kendi dosyanızı ekleyin', musicBad:'Dosya bozuk/çok kısa — tam mp3 yükleyin', secControl:'BLOK KONTROL LİSTESİ', secControlSub:'FAB DRAWING takip listesi — her iş kalemi, blok, sorumlu ve teslim tarihleri.', ctlAll:'Tümü', ctlDone:'Tamamlandı', ctlProgress:'Devam ediyor', ctlOverdue:'Gecikmiş', ctlPerson:'Sorumlu', ctlPersonAll:'Tüm sorumlular', ctlSearch:'Ara (blok / iş / sorumlu)…', ctlBlock:'Blok', ctlStatus:'Durum', ctlComment:'Tarih', ctlProgressLbl:'İş kalemi', ctlNone:'Filtreye uygun blok yok.', ctlUnassigned:'Atanmamış', ctlWarn:'Dikkat gerektirir',
+      secFinance:'TEDARİK & FİNANS', secFinanceSub:'Malzeme tedariği ve ödeme durumu — gizli bölüm.', finProjTitle:'PROJE TOPLAMI', finProjSub:'Sözleşme türlerine göre tutar ve ödemeler — ₸ ve USD.', finPlanLocTitle:'ÖDEME PLANI — YEREL (₸)', finPlanLocSub:'Yerel tedarikçiler için ödeme planı.', finPlanImpTitle:'ÖDEME PLANI — İTHALAT ($)', finPlanImpSub:'İthalat tedarikçileri için ödeme planı.', fpColComp:'Firma', fpColMat:'Malzeme', fpColObj:'Obje', fpLocDebtT:'Borç (₸)', fpLocDebtU:'Borç ($)', fpLocPaid:'Ödendi ($)', fpImpP1:'Plan 1 · 10.07', fpImpP2:'Plan 2 · 05.08', fpTotal:'TOPLAM', fpUsd:'USD olarak', fpContract:'Sözleşme tutarı', fpPaid:'Ödendi', fpDebt:'Borç', finLock:'🔒 Kilitle', finLockedTitle:'Bu bölüm korumalı', finLockedSub:'Finansal verileri görmek için şifre girin.', finPw:'Şifre', finUnlock:'Aç', finWrong:'Hatalı şifre. Tekrar deneyin.', finTotalLbl:'Toplam sözleşme', finPaidLbl:'Ödenen', finRemainLbl:'Kalan', finOrderedLbl:'Sipariş edilen', finContract:'Sipariş', finPaid:'Ödenen', finSupplyTitle:'Malzeme bazında tedarik', finPayPct:'Ödeme %', finDebtTitle:'ÖDENECEK — TEDARİKÇİ BORÇLARI', finDebtSub:'Bize ödeme çıkan tutarlar — firma ve malzeme bazında (₸).', finDebtUsd:'USD karşılığı', finDebtTotalLbl:'Toplam borç', finDebtRowsLbl:'kayıt', colNo:'№', colFirma:'Firma', colMaterial:'Malzeme', colToplam:'Toplam', colOdendi:'Ödendi', colBorc:'BORÇ', finJami:'GENEL TOPLAM', blockPhoto:'Blok fotoğrafı', today:'Bugün', m2:'m²', totalArea:'Toplam alan', montajTitle:'MONTAJ · Metrajlar', gVitraj:'Vitray cephe', gTas:'Taş cephe', total:'Toplam', secEtap:'1. ETAP DURUMU', secEtapSub:'Cephe işleri kırılımı — kategori, metraj ağırlığı ve montaj ilerlemesi (m² / adet).', etapTotal:'Toplam metraj', colProje:'Proje toplam', colMontaj:'Toplam montaj', colProgress:'İlerleme', secDaily:'GÜNLÜK YAPILAN İŞLER', secDailySub:'Hangi blokta bugün ne yapıldı — her gün güncellenir.', secArchive:'GÜNLÜK FOTO ARŞİVİ', secArchiveSub:'Her güne ait saha fotoğrafları. Bugün aktif, önceki günler arşivde.', lblActive:'AKTİF', lblArchive:'ARŞİV', lblToday:'BUGÜN', colBlock:'Blok', colWork:'İş', colDaily:'Bugün', noDaily:'Bugün için montaj kaydı bulunamadı.', archiveNote:'Arşiv günü — saha fotoğrafları. Yapılan iş kayıtları yalnızca aktif (bugün) görünür.', photoAdd:'Foto ekle', secPersonnel:'PERSONEL · GÜNLÜK EKİP', pTeknik:'Teknik Ekip', pSaha:'Saha Ekibi', pFabrika:'Fabrika', pTotal:'GENEL TOPLAM', pPerson:'kişi', pGeneral:'GENEL', secChizma:'ÇİZİM & KONSTRÜKSİYON', secChizmaSub:'Proje / konstrüksiyon bölümü — etap bazında çizim aşamaları (genel).', chEtap:'Etap', chNotStarted:'Başlamadı', chBlocks:'Bloklar', chItems:'kalem', secProject:'PROJE GENELİ · 3 ETAP', lblCizim:'Çizim', lblMontaj:'Montaj', videoBtn:'Video yükle', videoHint:'Video dosyası ekle (sessiz oynar)', musicTitle:'Fon müziği', musicSet:'Müzik dosyası seç', musicNone:'Müzik yok', musicHint:'Fon müziği (mp3) — kendi dosyanızı ekleyin', musicBad:'Dosya bozuk/çok kısa — tam mp3 yükleyin', secControl:'BLOK KONTROL LİSTESİ', secControlSub:'FAB DRAWING takip listesi — her iş kalemi, blok, sorumlu ve teslim tarihleri.', ctlAll:'Tümü', ctlDone:'Tamamlandı', ctlProgress:'Devam ediyor', ctlOverdue:'Gecikmiş', ctlPerson:'Sorumlu', ctlPersonAll:'Tüm sorumlular', ctlSearch:'Ara (blok / iş / sorumlu)…', ctlBlock:'Blok', ctlStatus:'Durum', ctlComment:'Tarih', ctlProgressLbl:'İş kalemi', ctlNone:'Filtreye uygun blok yok.', ctlUnassigned:'Atanmamış', ctlWarn:'Dikkat gerektirir',
     },
     uz: {
       systemTag:'ALUTECH TIZIMI', live:'JONLI', present:'TAQDIMOT', presentHint:'To‘liq ekran faqat yuklab olingan faylda ishlaydi — videolar ishga tushdi ▶', themeLabel:'MAVZU', updated:'YANGILANDI',
@@ -3331,7 +3529,7 @@ class Component extends DCLogic {
       subDone:'100% bajarilgan', subActive:'ish jarayonida', subDelayYes:'e’tibor talab qiladi', subDelayNo:'kechikish yo‘q',
       subOverall:(n)=>n+' blok bo‘yicha o‘rtacha', delayFlag:'▲ kechikish',
       connEnter:'Iltimos, URL kiriting.', connConnecting:'Ulanmoqda…', connOk:'✓ Ulandi. Har 60 soniyada yangilanadi.', connDemo:'Xatolik — demo ma’lumotlar ko‘rsatilmoqda.', statusDemo:'Hozircha demo ma’lumotlar ko‘rsatilmoqda.',
-      secFinance:'TA’MINOT & MOLIYA', secFinanceSub:'Material ta’minoti va to‘lov holati — maxfiy bo‘lim.', finProjTitle:'LOYIHA BO‘YICHA JAMI', finProjSub:'Shartnoma turlari bo‘yicha summa va to‘lovlar — ₸ va USD.', finPlanLocTitle:'TO‘LOV REJASI — MAHALLIY (₸)', finPlanLocSub:'Mahalliy ta’minotchilar bo‘yicha to‘lov rejasi.', finPlanImpTitle:'TO‘LOV REJASI — IMPORT ($)', finPlanImpSub:'Import ta’minotchilar bo‘yicha to‘lov rejasi.', fpColComp:'Firma', fpColMat:'Material', fpColObj:'Obyekt', fpLocP1:'Reja 1 · shoshilinch', fpLocP2:'Reja 2 · 10.07', fpLocP3:'Reja 3 · 05.08', fpImpP1:'Reja 1 · 10.07', fpImpP2:'Reja 2 · 05.08', fpTotal:'JAMI', fpUsd:'USD da', fpContract:'Shartnoma summasi', fpPaid:'To‘langan', fpDebt:'Qarz', finLock:'🔒 Yopish', finLockedTitle:'Bu bo‘lim himoyalangan', finLockedSub:'Moliyaviy ma’lumotni ko‘rish uchun parol kiriting.', finPw:'Parol', finUnlock:'Ochish', finWrong:'Parol noto‘g‘ri. Qayta urinib ko‘ring.', finTotalLbl:'Umumiy shartnoma', finPaidLbl:'To‘langan', finRemainLbl:'Qolgan', finOrderedLbl:'Buyurtma qilingan', finContract:'Buyurtma', finPaid:'To‘langan', finSupplyTitle:'Material bo‘yicha ta’minot', finPayPct:'To‘lov %', finDebtTitle:'TO‘LANADIGAN — TA’MINOTCHI QARZLARI', finDebtSub:'Biz to‘lashimiz kerak bo‘lgan summalar — firma va material bo‘yicha (₸).', finDebtUsd:'USD ekvivalenti', finDebtTotalLbl:'Umumiy qarz', finDebtRowsLbl:'ta yozuv', colNo:'№', colFirma:'Firma', colMaterial:'Material', colToplam:'Jami', colOdendi:'To‘landi', colBorc:'QARZ', finJami:'JAMI', blockPhoto:'Blok fotosi', today:'Bugun', m2:'m²', totalArea:'Umumiy maydon', montajTitle:'MONTAJ · Miqdorlar', gVitraj:'Vitraj fasad', gTas:'Tosh fasad', total:'Jami', secEtap:'1-ETAP holati', secEtapSub:'Fasad ishlari taqsimoti — kategoriya, metraj og‘irligi va montaj progressi (m² / dona).', etapTotal:'Umumiy metraj', colProje:'Loyiha jami', colMontaj:'Montaj jami', colProgress:'Bajarildi', secDaily:'KUNLIK BAJARILGAN ISHLAR', secDailySub:'Qaysi blokda bugun nima qilindi — har kuni yangilanadi.', secArchive:'KUNLIK FOTO ARXIV', secArchiveSub:'Har kunning saha fotolari. Bugun aktiv, oldingi kunlar arxivda.', lblActive:'AKTIV', lblArchive:'ARXIV', lblToday:'BUGUN', colBlock:'Blok', colWork:'Ish', colDaily:'Bugun', noDaily:'Bugun uchun montaj qaydi topilmadi.', archiveNote:'Arxiv kuni — saha fotolari. Bajarilgan ish qaydlari faqat aktiv (bugun) ko‘rinadi.', photoAdd:'Foto qo‘shish', secPersonnel:'PERSONAL · KUNLIK BRIGADA', pTeknik:'Texnik guruh', pSaha:'Saha brigadasi', pFabrika:'Fabrika', pTotal:'UMUMIY', pPerson:'kishi', pGeneral:'UMUMIY', secChizma:'CHIZMA & KONSTRUKTOR', secChizmaSub:'Loyiha / konstruktor bo‘limi — etap bo‘yicha chizma bosqichlari (umumiy).', chEtap:'Etap', chNotStarted:'Boshlanmagan', chBlocks:'Bloklar', chItems:'element', secProject:'LOYIHA — 3 ETAP', lblCizim:'Chizma', lblMontaj:'Montaj', videoBtn:'Video yuklash', videoHint:'Video fayl qo‘shing (ovozsiz o‘ynaydi)', musicTitle:'Fon musiqasi', musicSet:'Musiqa faylini tanlang', musicNone:'Musiqa yo‘q', musicHint:'Fon musiqasi (mp3) — o‘z faylingizni qo‘shing', musicBad:'Fayl buzuq/juda qisqa — to‘liq mp3 yuklang', secControl:'BLOKLAR NAZORAT RO‘YXATI', secControlSub:'FAB DRAWING takib ro‘yxati — har bir ish kalemi, blok, mas’ul va topshirish sanalari.', ctlAll:'Barchasi', ctlDone:'Yakunlangan', ctlProgress:'Jarayonda', ctlOverdue:'Muddati o‘tgan', ctlPerson:'Mas’ul', ctlPersonAll:'Barcha mas’ullar', ctlSearch:'Qidirish (blok / ish / mas’ul)…', ctlBlock:'Blok', ctlStatus:'Holat', ctlComment:'Sana', ctlProgressLbl:'Ish kalemi', ctlNone:'Filtrga mos blok yo‘q.', ctlUnassigned:'Belgilanmagan', ctlWarn:'E’tibor talab qiladi',
+      secFinance:'TA’MINOT & MOLIYA', secFinanceSub:'Material ta’minoti va to‘lov holati — maxfiy bo‘lim.', finProjTitle:'LOYIHA BO‘YICHA JAMI', finProjSub:'Shartnoma turlari bo‘yicha summa va to‘lovlar — ₸ va USD.', finPlanLocTitle:'TO‘LOV REJASI — MAHALLIY (₸)', finPlanLocSub:'Mahalliy ta’minotchilar bo‘yicha to‘lov rejasi.', finPlanImpTitle:'TO‘LOV REJASI — IMPORT ($)', finPlanImpSub:'Import ta’minotchilar bo‘yicha to‘lov rejasi.', fpColComp:'Firma', fpColMat:'Material', fpColObj:'Obyekt', fpLocDebtT:'Qarz (₸)', fpLocDebtU:'Qarz ($)', fpLocPaid:'To‘langan ($)', fpImpP1:'Reja 1 · 10.07', fpImpP2:'Reja 2 · 05.08', fpTotal:'JAMI', fpUsd:'USD da', fpContract:'Shartnoma summasi', fpPaid:'To‘langan', fpDebt:'Qarz', finLock:'🔒 Yopish', finLockedTitle:'Bu bo‘lim himoyalangan', finLockedSub:'Moliyaviy ma’lumotni ko‘rish uchun parol kiriting.', finPw:'Parol', finUnlock:'Ochish', finWrong:'Parol noto‘g‘ri. Qayta urinib ko‘ring.', finTotalLbl:'Umumiy shartnoma', finPaidLbl:'To‘langan', finRemainLbl:'Qolgan', finOrderedLbl:'Buyurtma qilingan', finContract:'Buyurtma', finPaid:'To‘langan', finSupplyTitle:'Material bo‘yicha ta’minot', finPayPct:'To‘lov %', finDebtTitle:'TO‘LANADIGAN — TA’MINOTCHI QARZLARI', finDebtSub:'Biz to‘lashimiz kerak bo‘lgan summalar — firma va material bo‘yicha (₸).', finDebtUsd:'USD ekvivalenti', finDebtTotalLbl:'Umumiy qarz', finDebtRowsLbl:'ta yozuv', colNo:'№', colFirma:'Firma', colMaterial:'Material', colToplam:'Jami', colOdendi:'To‘landi', colBorc:'QARZ', finJami:'JAMI', blockPhoto:'Blok fotosi', today:'Bugun', m2:'m²', totalArea:'Umumiy maydon', montajTitle:'MONTAJ · Miqdorlar', gVitraj:'Vitraj fasad', gTas:'Tosh fasad', total:'Jami', secEtap:'1-ETAP holati', secEtapSub:'Fasad ishlari taqsimoti — kategoriya, metraj og‘irligi va montaj progressi (m² / dona).', etapTotal:'Umumiy metraj', colProje:'Loyiha jami', colMontaj:'Montaj jami', colProgress:'Bajarildi', secDaily:'KUNLIK BAJARILGAN ISHLAR', secDailySub:'Qaysi blokda bugun nima qilindi — har kuni yangilanadi.', secArchive:'KUNLIK FOTO ARXIV', secArchiveSub:'Har kunning saha fotolari. Bugun aktiv, oldingi kunlar arxivda.', lblActive:'AKTIV', lblArchive:'ARXIV', lblToday:'BUGUN', colBlock:'Blok', colWork:'Ish', colDaily:'Bugun', noDaily:'Bugun uchun montaj qaydi topilmadi.', archiveNote:'Arxiv kuni — saha fotolari. Bajarilgan ish qaydlari faqat aktiv (bugun) ko‘rinadi.', photoAdd:'Foto qo‘shish', secPersonnel:'PERSONAL · KUNLIK BRIGADA', pTeknik:'Texnik guruh', pSaha:'Saha brigadasi', pFabrika:'Fabrika', pTotal:'UMUMIY', pPerson:'kishi', pGeneral:'UMUMIY', secChizma:'CHIZMA & KONSTRUKTOR', secChizmaSub:'Loyiha / konstruktor bo‘limi — etap bo‘yicha chizma bosqichlari (umumiy).', chEtap:'Etap', chNotStarted:'Boshlanmagan', chBlocks:'Bloklar', chItems:'element', secProject:'LOYIHA — 3 ETAP', lblCizim:'Chizma', lblMontaj:'Montaj', videoBtn:'Video yuklash', videoHint:'Video fayl qo‘shing (ovozsiz o‘ynaydi)', musicTitle:'Fon musiqasi', musicSet:'Musiqa faylini tanlang', musicNone:'Musiqa yo‘q', musicHint:'Fon musiqasi (mp3) — o‘z faylingizni qo‘shing', musicBad:'Fayl buzuq/juda qisqa — to‘liq mp3 yuklang', secControl:'BLOKLAR NAZORAT RO‘YXATI', secControlSub:'FAB DRAWING takib ro‘yxati — har bir ish kalemi, blok, mas’ul va topshirish sanalari.', ctlAll:'Barchasi', ctlDone:'Yakunlangan', ctlProgress:'Jarayonda', ctlOverdue:'Muddati o‘tgan', ctlPerson:'Mas’ul', ctlPersonAll:'Barcha mas’ullar', ctlSearch:'Qidirish (blok / ish / mas’ul)…', ctlBlock:'Blok', ctlStatus:'Holat', ctlComment:'Sana', ctlProgressLbl:'Ish kalemi', ctlNone:'Filtrga mos blok yo‘q.', ctlUnassigned:'Belgilanmagan', ctlWarn:'E’tibor talab qiladi',
     },
     ru: {
       systemTag:'СИСТЕМА ALUTECH', live:'ОНЛАЙН', present:'ПРЕЗЕНТАЦИЯ', presentHint:'Полный экран работает только в скачанном файле — видео запущены ▶', themeLabel:'ТЕМА', updated:'ОБНОВЛЕНО',
@@ -3355,7 +3553,7 @@ class Component extends DCLogic {
       subDone:'100% выполнено', subActive:'в процессе', subDelayYes:'требует внимания', subDelayNo:'без задержек',
       subOverall:(n)=>'среднее по '+n+' блокам', delayFlag:'▲ задержка',
       connEnter:'Введите URL таблицы.', connConnecting:'Подключение…', connOk:'✓ Подключено. Обновление каждые 60с.', connDemo:'Ошибка — показаны демо-данные.', statusDemo:'Сейчас показаны демо-данные.',
-      secFinance:'СНАБЖЕНИЕ И ФИНАНСЫ', secFinanceSub:'Снабжение материалами и статус оплат — скрытый раздел.', finProjTitle:'ИТОГ ПО ПРОЕКТУ', finProjSub:'Суммы и оплаты по типам контрактов — ₸ и USD.', finPlanLocTitle:'ПЛАН ОПЛАТ — МЕСТНЫЕ (₸)', finPlanLocSub:'План оплат по местным поставщикам.', finPlanImpTitle:'ПЛАН ОПЛАТ — ИМПОРТ ($)', finPlanImpSub:'План оплат по импортным поставщикам.', fpColComp:'Компания', fpColMat:'Материал', fpColObj:'Объект', fpLocP1:'План 1 · срочно', fpLocP2:'План 2 · 10.07', fpLocP3:'План 3 · 05.08', fpImpP1:'План 1 · 10.07', fpImpP2:'План 2 · 05.08', fpTotal:'ИТОГО', fpUsd:'в USD', fpContract:'Сумма контракта', fpPaid:'Оплачено', fpDebt:'Долг', finLock:'🔒 Скрыть', finLockedTitle:'Раздел защищён', finLockedSub:'Введите пароль для просмотра финансовых данных.', finPw:'Пароль', finUnlock:'Открыть', finWrong:'Неверный пароль. Попробуйте снова.', finTotalLbl:'Всего по договору', finPaidLbl:'Оплачено', finRemainLbl:'Остаток', finOrderedLbl:'Заказано', finContract:'Заказ', finPaid:'Оплачено', finSupplyTitle:'Снабжение по материалам', finPayPct:'Оплата %', finDebtTitle:'К ОПЛАТЕ — ДОЛГИ ПОСТАВЩИКАМ', finDebtSub:'Суммы к оплате — по фирмам и материалам (₸).', finDebtUsd:'В USD', finDebtTotalLbl:'Общий долг', finDebtRowsLbl:'записей', colNo:'№', colFirma:'Фирма', colMaterial:'Материал', colToplam:'Итого', colOdendi:'Оплачено', colBorc:'ДОЛГ', finJami:'ИТОГО', blockPhoto:'Фото блока', today:'Сегодня', m2:'м²', totalArea:'Общая площадь', montajTitle:'МОНТАЖ · Объёмы', gVitraj:'Витраж', gTas:'Камень', total:'Всего', secEtap:'СТАТУС 1 ЭТАПА', secEtapSub:'Разбивка фасадных работ — категория, вес метража и прогресс монтажа (м² / шт).', etapTotal:'Общий метраж', colProje:'Всего по проекту', colMontaj:'Всего монтаж', colProgress:'Прогресс', secDaily:'РАБОТЫ ЗА ДЕНЬ', secDailySub:'Что сделано сегодня по блокам — обновляется ежедневно.', secArchive:'ЕЖЕДНЕВНЫЙ ФОТОАРХИВ', secArchiveSub:'Фото со стройки по дням. Сегодня активно, прошлые дни в архиве.', lblActive:'АКТИВНО', lblArchive:'АРХИВ', lblToday:'СЕГОДНЯ', colBlock:'Блок', colWork:'Работа', colDaily:'Сегодня', noDaily:'Нет записей монтажа за сегодня.', archiveNote:'Архивный день — фото. Записи работ видны только в активный (сегодня) день.', photoAdd:'Добавить фото', secPersonnel:'ПЕРСОНАЛ · СМЕНА ДНЯ', pTeknik:'Тех. группа', pSaha:'Бригада на объекте', pFabrika:'Завод', pTotal:'ВСЕГО', pPerson:'чел.', pGeneral:'ОБЩИЕ', secChizma:'ЧЕРТЁЖ & КОНСТРУКЦИЯ', secChizmaSub:'Отдел проекта / конструкции — этапы чертежей по этапам (общее).', chEtap:'Этап', chNotStarted:'Не начато', chBlocks:'Блоки', chItems:'поз.', secProject:'ПРОЕКТ — 3 ЭТАПА', lblCizim:'Чертёж', lblMontaj:'Монтаж', videoBtn:'Загрузить видео', videoHint:'Добавьте видеофайл (без звука)', musicTitle:'Фоновая музыка', musicSet:'Выбрать аудиофайл', musicNone:'Нет музыки', musicHint:'Фоновая музыка (mp3) — добавьте свой файл', musicBad:'Файл повреждён/слишком короткий — загрузите полный mp3', secControl:'КОНТРОЛЬНЫЙ СПИСОК БЛОКОВ', secControlSub:'Список FAB DRAWING — каждая задача, блок, ответственный и сроки сдачи.', ctlAll:'Все', ctlDone:'Завершено', ctlProgress:'В процессе', ctlOverdue:'Просрочено', ctlPerson:'Ответственный', ctlPersonAll:'Все ответственные', ctlSearch:'Поиск (блок / задача / отв.)…', ctlBlock:'Блок', ctlStatus:'Статус', ctlComment:'Сроки', ctlProgressLbl:'Задача', ctlNone:'Нет блоков по фильтру.', ctlUnassigned:'Не назначен', ctlWarn:'Требует внимания',
+      secFinance:'СНАБЖЕНИЕ И ФИНАНСЫ', secFinanceSub:'Снабжение материалами и статус оплат — скрытый раздел.', finProjTitle:'ИТОГ ПО ПРОЕКТУ', finProjSub:'Суммы и оплаты по типам контрактов — ₸ и USD.', finPlanLocTitle:'ПЛАН ОПЛАТ — МЕСТНЫЕ (₸)', finPlanLocSub:'План оплат по местным поставщикам.', finPlanImpTitle:'ПЛАН ОПЛАТ — ИМПОРТ ($)', finPlanImpSub:'План оплат по импортным поставщикам.', fpColComp:'Компания', fpColMat:'Материал', fpColObj:'Объект', fpLocDebtT:'Долг (₸)', fpLocDebtU:'Долг ($)', fpLocPaid:'Оплачено ($)', fpImpP1:'План 1 · 10.07', fpImpP2:'План 2 · 05.08', fpTotal:'ИТОГО', fpUsd:'в USD', fpContract:'Сумма контракта', fpPaid:'Оплачено', fpDebt:'Долг', finLock:'🔒 Скрыть', finLockedTitle:'Раздел защищён', finLockedSub:'Введите пароль для просмотра финансовых данных.', finPw:'Пароль', finUnlock:'Открыть', finWrong:'Неверный пароль. Попробуйте снова.', finTotalLbl:'Всего по договору', finPaidLbl:'Оплачено', finRemainLbl:'Остаток', finOrderedLbl:'Заказано', finContract:'Заказ', finPaid:'Оплачено', finSupplyTitle:'Снабжение по материалам', finPayPct:'Оплата %', finDebtTitle:'К ОПЛАТЕ — ДОЛГИ ПОСТАВЩИКАМ', finDebtSub:'Суммы к оплате — по фирмам и материалам (₸).', finDebtUsd:'В USD', finDebtTotalLbl:'Общий долг', finDebtRowsLbl:'записей', colNo:'№', colFirma:'Фирма', colMaterial:'Материал', colToplam:'Итого', colOdendi:'Оплачено', colBorc:'ДОЛГ', finJami:'ИТОГО', blockPhoto:'Фото блока', today:'Сегодня', m2:'м²', totalArea:'Общая площадь', montajTitle:'МОНТАЖ · Объёмы', gVitraj:'Витраж', gTas:'Камень', total:'Всего', secEtap:'СТАТУС 1 ЭТАПА', secEtapSub:'Разбивка фасадных работ — категория, вес метража и прогресс монтажа (м² / шт).', etapTotal:'Общий метраж', colProje:'Всего по проекту', colMontaj:'Всего монтаж', colProgress:'Прогресс', secDaily:'РАБОТЫ ЗА ДЕНЬ', secDailySub:'Что сделано сегодня по блокам — обновляется ежедневно.', secArchive:'ЕЖЕДНЕВНЫЙ ФОТОАРХИВ', secArchiveSub:'Фото со стройки по дням. Сегодня активно, прошлые дни в архиве.', lblActive:'АКТИВНО', lblArchive:'АРХИВ', lblToday:'СЕГОДНЯ', colBlock:'Блок', colWork:'Работа', colDaily:'Сегодня', noDaily:'Нет записей монтажа за сегодня.', archiveNote:'Архивный день — фото. Записи работ видны только в активный (сегодня) день.', photoAdd:'Добавить фото', secPersonnel:'ПЕРСОНАЛ · СМЕНА ДНЯ', pTeknik:'Тех. группа', pSaha:'Бригада на объекте', pFabrika:'Завод', pTotal:'ВСЕГО', pPerson:'чел.', pGeneral:'ОБЩИЕ', secChizma:'ЧЕРТЁЖ & КОНСТРУКЦИЯ', secChizmaSub:'Отдел проекта / конструкции — этапы чертежей по этапам (общее).', chEtap:'Этап', chNotStarted:'Не начато', chBlocks:'Блоки', chItems:'поз.', secProject:'ПРОЕКТ — 3 ЭТАПА', lblCizim:'Чертёж', lblMontaj:'Монтаж', videoBtn:'Загрузить видео', videoHint:'Добавьте видеофайл (без звука)', musicTitle:'Фоновая музыка', musicSet:'Выбрать аудиофайл', musicNone:'Нет музыки', musicHint:'Фоновая музыка (mp3) — добавьте свой файл', musicBad:'Файл повреждён/слишком короткий — загрузите полный mp3', secControl:'КОНТРОЛЬНЫЙ СПИСОК БЛОКОВ', secControlSub:'Список FAB DRAWING — каждая задача, блок, ответственный и сроки сдачи.', ctlAll:'Все', ctlDone:'Завершено', ctlProgress:'В процессе', ctlOverdue:'Просрочено', ctlPerson:'Ответственный', ctlPersonAll:'Все ответственные', ctlSearch:'Поиск (блок / задача / отв.)…', ctlBlock:'Блок', ctlStatus:'Статус', ctlComment:'Сроки', ctlProgressLbl:'Задача', ctlNone:'Нет блоков по фильтру.', ctlUnassigned:'Не назначен', ctlWarn:'Требует внимания',
     }
   };
 
@@ -3550,32 +3748,31 @@ class Component extends DCLogic {
   // Mahalliy to'lov reja (tenge) — 3 reja ustuni
   PLAN_LOCAL = {
     rows:[
-      { no:1, comp:'ТОО "СтеклоМир KZ"', material:'Стеклопакет 5 блок', obj:'Şantiye', p1:'', p2:'', p3:'21 313 270,00 ₸' },
-      { no:2, comp:'АЛЮТЕХ-АЗИЯ ТОО', material:'TIR 8', obj:'Fabrika', p1:'', p2:'', p3:'19 789 068,77 ₸' },
-      { no:3, comp:'Кинлонг Казахстан ТОО', material:'Samarez bolt; Фасадная люлька ZLP 630 — 40ad', obj:'Şantiye & Fabrika', p1:'', p2:'', p3:'19 395 284,28 ₸' },
-      { no:4, comp:'ИП EMbuild', material:'Sarf el aletlar; Remont yotoq 25 kishi', obj:'Şantiye & Fabrika', p1:'15 714 680,00 ₸', p2:'', p3:'' },
-      { no:5, comp:'ТОО AVECO GROUP', material:'Kutu profil 40*40 80*40', obj:'Şantiye', p1:'', p2:'9 679 192,00 ₸', p3:'' },
-      { no:6, comp:'Стрельников ИП', material:'Arenda Iyun', obj:'Fabrika', p1:'9 047 668,83 ₸', p2:'', p3:'' },
-      { no:7, comp:'РГУ УГД по Илийскому району', material:'Kranshteyn', obj:'Gümrük', p1:'3 675 000,00 ₸', p2:'', p3:'' },
-      { no:8, comp:'GOLD ShaR Group ИП', material:'Lyulka arenda', obj:'Şantiye', p1:'3 409 800,00 ₸', p2:'', p3:'' },
-      { no:9, comp:'ТОО ОТВЕРТКА.KZ', material:'Сварка аппарат', obj:'Fabrika', p1:'2 114 742,00 ₸', p2:'', p3:'' },
-      { no:10, comp:'ТОО ПК "HAN"', material:'Lesa 250 m2', obj:'Şantiye', p1:'1 643 500,00 ₸', p2:'', p3:'' },
-      { no:11, comp:'ТОО DIDA COMPANY', material:'Мини кран МКС 1т', obj:'Şantiye', p1:'550 000,00 ₸', p2:'', p3:'' },
-      { no:12, comp:'ТОО AST Metal Group', material:'Galvaniz imalat', obj:'Fabrika', p1:'446 000,00 ₸', p2:'', p3:'' },
-      { no:13, comp:'Tycoon Group ТОО', material:'Broker', obj:'Şantiye', p1:'169 600,00 ₸', p2:'', p3:'' },
-      { no:14, comp:'ИП «AK TRANSIT»', material:'Dostavka gazel', obj:'Şantiye', p1:'160 000,00 ₸', p2:'', p3:'' },
-      { no:15, comp:'ИП Айгөлек', material:'Маршрутка фабрика — уй 12 киши', obj:'Fabrika', p1:'150 000,00 ₸', p2:'', p3:'' },
-      { no:16, comp:'Фирма Торговая палата', material:'Сертификат Соответствия РК ЕАС', obj:'Fabrika', p1:'140 000,00 ₸', p2:'', p3:'' },
-      { no:17, comp:'ТОО ADAL BROK SERVICE', material:'Broker', obj:'Şantiye', p1:'130 000,00 ₸', p2:'', p3:'' },
-      { no:18, comp:'Ботабаева Камшат Болатовна ИП', material:'5 желетка 5 каска гостевые', obj:'Şantiye', p1:'75 500,00 ₸', p2:'', p3:'' },
-      { no:19, comp:'ТОО "NLS KAZAKHSTAN"', material:'Интернет стройка', obj:'Şantiye', p1:'66 445,16 ₸', p2:'', p3:'' },
-      { no:20, comp:'ТОО Фирма Торговая Палата', material:'АКТ экспертиза', obj:'Şantiye', p1:'30 000,00 ₸', p2:'', p3:'' },
-      { no:21, comp:'ИП Ботабаева Камшат Болатовна', material:'Жилет сигнальный оранжевый Z-03', obj:'Şantiye', p1:'8 800,00 ₸', p2:'', p3:'' },
-      { no:22, comp:'Сладок ИП', material:'Вода питьевая, 18,9 л. Oasis 300шт', obj:'Şantiye & Fabrika', p1:'420 000,00 ₸', p2:'', p3:'' },
-      { no:23, comp:'ТОО Алюмин оф Казахитсан', material:'Klips profil Hoffmann', obj:'Şantiye', p1:'24 500 000,00 ₸', p2:'', p3:'' },
+      { no:2, material:"Sarf el aletlar; Remont yotoq 25 kishi", obj:"Şantiye & Fabrika", debtT:"15.714.680,00 ₸", debtU:"$ 33,940.99", paid:"$ 18,736.00" },
+      { no:3, material:"Kutu profil 40*40 80*40", obj:"Şantiye", debtT:"9.679.192,00 ₸", debtU:"$ 20,905.38", paid:"$ 20,905.38" },
+      { no:4, material:"Arenda Iyun Iyul", obj:"Fabrika", debtT:"18.522.000,00 ₸", debtU:"$ 40,004.32", paid:"$ 20,718.37" },
+      { no:5, material:"Kranshteyn", obj:"Gümrük", debtT:"3.675.000,00 ₸", debtU:"$ 0.00", paid:"$ 8,224.62" },
+      { no:6, material:"Lyulka arenda", obj:"Şantiye", debtT:"3.409.800,00 ₸", debtU:"$ 7,364.58", paid:"$ 1,800.00" },
+      { no:7, material:"Сварка аппарат", obj:"Fabrika", debtT:"2.114.742,00 ₸", debtU:"$ 4,567.48", paid:"$ 2.00" },
+      { no:8, material:"Lesa 250 m2", obj:"Şantiye", debtT:"1.643.500,00 ₸", debtU:"$ 3,549.68", paid:"$ 3,549.68" },
+      { no:9, material:"Мини кран МКС 1т", obj:"Şantiye", debtT:"550.000,00 ₸", debtU:"$ 1,187.90", paid:"$ 1,200.00" },
+      { no:10, material:"Galvaniz imalat", obj:"Fabrika", debtT:"446.000,00 ₸", debtU:"$ 963.28", paid:"$ 963.28" },
+      { no:11, material:"Broker", obj:"Şantiye", debtT:"169.600,00 ₸", debtU:"$ 366.31", paid:"$ 366.31" },
+      { no:12, material:"Dostavka gazel", obj:"Şantiye", debtT:"160.000,00 ₸", debtU:"$ 345.57", paid:"$ 345.57" },
+      { no:13, material:"Маршрутка фабрика - уй 12 киши", obj:"Fabrika", debtT:"150.000,00 ₸", debtU:"$ 323.97", paid:"$ 323.97" },
+      { no:14, material:"Сертификат Соответствия РК ЕАС", obj:"Fabrika", debtT:"140.000,00 ₸", debtU:"$ 302.38", paid:"$ 302.38" },
+      { no:15, material:"Broker", obj:"Şantiye", debtT:"130.000,00 ₸", debtU:"$ 280.78", paid:"$ 280.78" },
+      { no:16, material:"5 желетка 5 каска гостевые", obj:"Şantiye", debtT:"75.500,00 ₸", debtU:"$ 163.07", paid:"$ 163.07" },
+      { no:17, material:"Интернет стройка", obj:"Şantiye", debtT:"66.445,16 ₸", debtU:"$ 143.51", paid:"$ 143.51" },
+      { no:18, material:"АКТ экспертиза", obj:"Şantiye", debtT:"30.000,00 ₸", debtU:"$ 64.79", paid:"$ 64.79" },
+      { no:19, material:"Жилет сигнальный оранжевый Z-03", obj:"Şantiye", debtT:"8.800,00 ₸", debtU:"$ 19.01", paid:"$ 19.01" },
+      { no:20, material:"Вода питьевая, 18,9 л. Oasis 300шт", obj:"Şantiye & Fabrika", debtT:"420.000,00 ₸", debtU:"$ 907.13", paid:"$ 907.13" },
+      { no:21, material:"Kesim makinasi fabrika", obj:"Fabrika", debtT:"3.120.000,00 ₸", debtU:"$ 6,500.00", paid:"$ 6,500.00" },
+      { no:22, material:"Klips profil Hoffmann", obj:"Şantiye", debtT:"24.500.000,00 ₸", debtU:"$ 51,041.67", paid:"$ 24.00" },
+      { no:23, material:"Broker", obj:"Şantiye", debtT:"65.000,00 ₸", debtU:"$ 0.00", paid:"$ 140.39" },
+      { no:24, material:"Sarf el aletlar; fabrika new", obj:"Fabrika", debtT:"2.572.700,00 ₸", debtU:"$ 5,556.59", paid:"$ 5,556.59" },
     ],
-    totals:{ p1:'62 451 735,99 ₸', p2:'9 679 192,00 ₸', p3:'60 497 623,05 ₸' },
-    totalsUsd:{ p1:'$ 127 452,52', p2:'$ 19 753,45', p3:'$ 123 464,54' }
+    totals:{ debtT:'87.362.959,16 ₸', debtU:'$ 172,941.79', paid:'$ 39,641.38' }
   };
   // Import to'lov reja (USD) — 2 reja ustuni
   PLAN_IMPORT = {
@@ -4697,4 +4894,242 @@ class Component extends DCLogic {
       lead:!!m.lead,
       accent:m.lead?t.warn:t.primary,
       accentSoft:m.lead?(this.state.theme==='deep'?'rgba(240,162,74,0.16)':'rgba(221,122,30,0.12)'):t.primarySoft,
-      stageGrad:m.lead?`radial-gradient(120% 90% at 50% 15%, #3a2a12 0%, #14100a 70%)`:`radial-gradient(120% 90% at 50% 15%,
+      stageGrad:m.lead?`radial-gradient(120% 90% at 50% 15%, #3a2a12 0%, #14100a 70%)`:`radial-gradient(120% 90% at 50% 15%, ${t.surface2} 0%, #0a1626 72%)`,
+      glow:m.lead?'rgba(240,162,74,0.28)':'rgba(31,95,208,0.30)',
+      hasVid:!!teamVideos[m.id], vidUrl:teamVideos[m.id]||'',
+      gifUrl:m.gif||'',
+      gifEl:m.gif?React.createElement('img',{src:m.gif,alt:m.first+' '+m.last,style:{position:'absolute',inset:'6px 6px 18px',width:'calc(100% - 12px)',height:'calc(100% - 24px)',objectFit:'contain',objectPosition:'center bottom'}}):null,
+      showVid:!!teamVideos[m.id],
+      showGif:!!m.gif && !teamVideos[m.id],
+      showSlot:!m.gif && !teamVideos[m.id],
+      pickVid:()=>{ this._pendingVidMember=m.id; if(this.teamVidInput.current) this.teamVidInput.current.click(); },
+      onVidDrop:(e)=>{ e.preventDefault(); const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0]; if(f&&/^video\//.test(f.type)) this.loadTeamVideo(m.id,f); },
+      clearVid:()=>this.clearTeamVideo(m.id),
+    }));
+
+    const emb=this.heroEmbed();
+    let embF=emb; if(this.state.heroVideoFileUrl) embF={ iframe:false, src:this.state.heroVideoFileUrl };
+    const hasVideo=!!embF, noVideo=!embF, heroIframe=!!(embF&&embF.iframe), heroFile=!!(embF&&!embF.iframe), heroSrc=embF?embF.src:'';
+
+    const fmtUsd=(n)=>{ if(!n) return '$0'; return '$'+Math.round(n).toLocaleString('en-US'); };
+    const F=this.state.finance || this.DEMO_FINANCE;
+    const finRemainNum=Math.max(0,(F.contractNum||0)-(F.paidNum||0));
+    let finPaidPct = F.contractNum? Math.round((F.paidNum/F.contractNum)*100):0;
+    let finKpis=[
+      { label:L.finTotalLbl, value:fmtUsd(F.contractNum), color:t.ink },
+      { label:L.finPaidLbl, value:fmtUsd(F.paidNum), sub:finPaidPct+'%', color:t.good },
+      { label:L.finRemainLbl, value:fmtUsd(finRemainNum), color:t.warn },
+      { label:L.finOrderedLbl, value:fmtUsd(F.orderedNum), color:t.primary },
+    ];
+    let finItems=(F.items||[]).map((it,ci)=>{ const pct=it.orderNum? Math.round((it.paidNum/it.orderNum)*100):0; return { cat:it.cat, order:fmtUsd(it.orderNum), paid:fmtUsd(it.paidNum), pctText:pct+'%', w:pct+'%', color:this.ETAP_COLORS[ci%4] }; });
+    let finPaidW=finPaidPct+'%';
+    if(this.state.remoteSupply && this.state.remoteSupply.length){
+      const _tng=(n)=>'\u20b8'+(Math.round(Number(n)||0)).toLocaleString('ru-RU');
+      // Kengaytirilgan status-filtr: "\u00d6deme bekliyor" + variantlar; moslik topilmasa — hammasi ko'rsatiladi + ogohlantirish
+      const _statusRe=/[o\u00f6]deme|bekliyor|beklemede|pending|awaiting|kutil|\u043e\u0436\u0438\u0434\u0430|\u043d\u0435\s*\u043e\u043f\u043b\u0430\u0447/i;
+      const _aw=this.state.remoteSupply.filter(r=>_statusRe.test(String(r.status||'')));
+      const _rows=_aw.length?_aw:this.state.remoteSupply;
+      const _filtWarn=!_aw.length && this.state.remoteSupply.some(r=>String(r.status||'').trim());
+      const _tot=_rows.reduce((a,r)=>a+(Number(r.toplam)||0),0);
+      const _pad=_rows.reduce((a,r)=>a+(Number(r.odendi)||0),0);
+      const _rem=_tot-_pad; // ishora saqlanadi: manfiy = ortiqcha to'lov
+      finPaidPct=_tot?Math.round(_pad/_tot*100):0;
+      finPaidW=finPaidPct+'%';
+      finKpis=[
+        { label:L.finTotalLbl, value:_tng(_tot), color:t.ink },
+        { label:L.finPaidLbl, value:_tng(_pad), sub:finPaidPct+'%', color:t.good },
+        { label:L.finRemainLbl, value:_tng(_rem), color:t.warn },
+        { label:L.finOrderedLbl, value:String(_rows.length), color:t.primary },
+      ];
+      if(_filtWarn){ finKpis[3].sub='\u26a0 status?'; finKpis[3].color=t.warn; }
+      finItems=_rows.map((r,ci)=>{ const _o=Number(r.toplam)||0,_p=Number(r.odendi)||0; const _pct=_o?Math.round(_p/_o*100):0; return { cat:(r.firma||'')+(r.material?(' \u00b7 '+r.material):''), order:_tng(_o), paid:_tng(_p), pctText:_pct+'%', w:_pct+'%', color:this.ETAP_COLORS[ci%4] }; });
+    }
+    const financeUnlocked=this.state.financeUnlocked, financeLocked=!this.state.financeUnlocked;
+
+    const fmtTng=(n)=>(Number(n)||0).toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2})+' ₸';
+    const fmtNum=(n)=>(Number(n)||0).toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const SD=this.SUPPLY_DEBT;
+    const _botSupply=(this.state.botAdds&&this.state.botAdds.supply)||[];
+    const _remote=this.state.remoteSupply;
+    const _baseSupply=(_remote&&_remote.length!=null)?_remote.map(r=>({firma:r.firma,material:r.material,toplam:Number(r.toplam)||0,odendi:Number(r.odendi)||0,borc:(r.borc!=null?Number(r.borc):(Number(r.toplam)||0)-(Number(r.odendi)||0))})):SD.rows;
+    const _allSupply=[..._botSupply.map(r=>({firma:r.firma,material:r.material,toplam:Number(r.toplam)||0,odendi:Number(r.odendi)||0,borc:(Number(r.toplam)||0)-(Number(r.odendi)||0),_bot:true})), ..._baseSupply]
+      .sort((a,b)=>((b.borc!=null?b.borc:(b.toplam-b.odendi))||0)-((a.borc!=null?a.borc:(a.toplam-a.odendi))||0));
+    const supplyDebt=_allSupply.map((r,i)=>({ no:i+1, firma:r.firma, material:r.material, toplam:fmtNum(r.toplam), odendi:r.odendi>0?fmtNum(r.odendi):'—', odendiColor:r.odendi>0?t.good:t.faint, borc:fmtNum(r.borc!=null?r.borc:(r.toplam-r.odendi)), firmaColor:r._bot?t.primary:t.ink }));
+    const _sumT=_allSupply.reduce((a,r)=>a+(Number(r.toplam)||0),0), _sumO=_allSupply.reduce((a,r)=>a+(Number(r.odendi)||0),0), _sumB=_allSupply.reduce((a,r)=>a+(Number(r.borc!=null?r.borc:(r.toplam-r.odendi))||0),0);
+    const _usdRate=Math.abs(this.dfNum((this.state.driveCfg||{}).usdRate))||490; // 1 USD = ? \u20b8 — sozlamalarda o'zgartiriladi
+    const supplyTotals={ toplam:fmtNum(_sumT), odendi:fmtNum(_sumO), borc:fmtNum(_sumB), usd:'$ '+(_sumB/_usdRate).toLocaleString('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}), count:_allSupply.length };
+
+    // Loyiha jami + to'lov rejalar (display satrlar)
+    const projRows=this.PROJECT_TOTAL.rows, projSubs=this.PROJECT_TOTAL.subtotals, projGrand=this.PROJECT_TOTAL.grand;
+    const planLocalRows=this.PLAN_LOCAL.rows, planLocalTot=this.PLAN_LOCAL.totals;
+    const planImportRows=this.PLAN_IMPORT.rows, planImportTot=this.PLAN_IMPORT.totals;
+
+    const ob=bl.find(b=>b.id===this.state.openBlockId);
+    let modalBlock=null;
+    if(ob){
+      const cats=(ob.categories||[]).map((c,ci)=>({
+        name:this.tr(c.name,lang), m2:c.m2, weight:c.weight, pctText:c.pct+'%', barW:c.pct+'%', color:this.ETAP_COLORS[ci%this.ETAP_COLORS.length],
+        works:(c.works||[]).map(w=>({ name:this.tr(w.name,lang), total:this.tr(w.total,lang), montaj:this.tr(w.montaj,lang), pctText:w.pct+'%', w:w.pct+'%' }))
+      }));
+      modalBlock={ id:ob.id, pctText:ob.overall+'%', totalM2:ob.totalM2||'', photoId:'df-block-'+ob.id, photoHint:ob.id+' · '+L.blockPhoto, dateText:L.today+' · '+today, categories:cats, hasCats:cats.length>0 };
+    }
+
+    const segActive=`font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;border:none;cursor:pointer;padding:6px 11px;border-radius:7px;color:#fff;background:${t.primary};`;
+    const segIdle=`font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;border:none;cursor:pointer;padding:6px 11px;border-radius:7px;color:${t.muted};background:transparent;`;
+
+    const st=this.state.status;
+    const statusColor=st.type==='ok'?t.good:(st.type==='err'?t.warn:t.muted);
+    const statusMsg=st.msg||L.statusDemo;
+
+    const charts=this.buildCharts(t,L,lang);
+
+    const BL=this.BOT_L[lang];
+    const botMessages=this.state.botMsgs.map(m=>{ const isBot=m.role!=='user'; return { id:m.id, text:m.text, justify:isBot?'flex-start':'flex-end', radius:isBot?'13px 13px 13px 4px':'13px 13px 4px 13px', bubbleBg:isBot?t.surface2:t.primary, bubbleInk:isBot?t.ink:'#ffffff', bubbleLine:isBot?t.line:t.primary, photoEl: m.photo?React.createElement('img',{src:m.photo,style:{maxWidth:'180px',borderRadius:'10px',display:'block',marginBottom:'5px',border:'1px solid '+t.line}}):null, hasOps:(m.opCount||0)>0, opText:(m.opCount||0)+' '+BL.records }; });
+    const botPendingView=this.state.botPending.map(op=>{ const d=this.describeOp(op); return Object.assign({},d,{ apply:()=>this.applyOne(op._pid), dismiss:()=>this.dismissOne(op._pid) }); });
+    const botLogView=this.state.botLog.slice(0,40);
+    const _adds=this.state.botAdds||{supply:[],daily:[],notes:[],tasks:[],photos:[]};
+    const botAddGroups=[
+      { key:'supply', icon:'\u20b8', color:'#dd7a1e', label:'Ta\u2019minot', items:_adds.supply.map(x=>({ title:x.firma, sub:(x.material||'')+' \u00b7 '+(Number(x.toplam)||0).toLocaleString('ru-RU')+' \u20b8' })) },
+      { key:'daily', icon:'\u2713', color:'#0e9f8f', label:L.secDaily, items:_adds.daily.map(x=>({ title:(x.block?x.block+' \u00b7 ':'')+x.work, sub:x.daily?('+'+x.daily):'' })) },
+      { key:'tasks', icon:'\u2691', color:'#dd7a1e', label:'Vazifa', items:_adds.tasks.map(x=>({ title:x.title, sub:(x.who?('\ud83d\udc64 '+x.who+' \u2014 '):'')+x.text })) },
+      { key:'notes', icon:'\u270e', color:'#5c6b7c', label:'Izoh', items:_adds.notes.map(x=>({ title:x.title, sub:x.text })) },
+    ].filter(g=>g.items.length);
+    const botCount=this.state.botLog.length;
+    const bsC=this.state.blocks.length, ecC=this.state.etap.categories.length, mtC=this.state.materials.length, czC=(this.state.chizma&&this.state.chizma.etaps?this.state.chizma.etaps.length:0);
+    const botSources=[
+      { label:L.secKpi, src:BL.srcCalc, tab:'bloklardan (auto)', count:'auto', color:t.faint },
+      { label:L.secEtap, src:BL.srcSheet, tab:'İLERLEME ETAP_01 · gid '+this.MASTER_GID, count:ecC, color:'#159a6b' },
+      { label:L.secBlocks, src:BL.srcSheet, tab:this.BLOCKS_TAB+' · gid '+this.MONTAJ_GID, count:bsC, color:'#1f5fd0' },
+      { label:L.secTypes, src:BL.srcSheet, tab:'gid '+this.MATERIALS_GID, count:mtC, color:'#6d6ce0' },
+      { label:L.secChizma, src:BL.srcSheet, tab:'CHIZMA · gid '+this.CHIZMA_GID, count:czC, color:'#0e9f8f' },
+      { label:L.secPersonnel, src:BL.srcSheet, tab:'PERSONEL · gid '+this.PERSONNEL_GID, count:((this.state.personnel&&this.state.personnel.total)||'—'), color:'#7a6cf0' },
+      { label:L.secDaily, src:BL.srcSheet, tab:'blok GÜNLÜK varaqlari', count:(_adds.daily.length?('+'+_adds.daily.length):'—'), color:'#159a6b' },
+      { label:L.secFinance, src:BL.srcManual, tab:'maxfiy', count:'🔒', color:'#dd7a1e' },
+      { label:L.finDebtTitle, src:BL.srcManual, tab:'Bot + qo‘lda', count:(this.SUPPLY_DEBT.rows.length+_adds.supply.length), color:'#dd7a1e' },
+    ];
+
+    // ---- Hero gauge + material stages (image 1 & 2) ----
+    const heroC = 2*Math.PI*42;
+    const heroDash = heroC.toFixed(1);
+    const heroOffset = (heroC*(1-overall/100)).toFixed(1);
+    const activeBlocksText = bl.filter(b=>b.overall>0).length + ' / ' + bl.length;
+    const HS = {
+      uz:{ eye:'JK Diamond · Almaty · ALKZ / Walter', t1:'Fasad montaj', t2:'tempi', sub:'Ventilyatsion fasad — 3 etap, 7 blok, alyumin qoplama. Barcha raqamlar Google Sheets\u2019dan real vaqtda hisoblanadi.', overall:'jami bajarildi', total:'Umumiy maydon', blocks:'Faol bloklar', matTitle:'Materiallar — bosqichlar', matSub:'Shopdrawing \u2192 montaj — har bir material bo\u2018yicha bosqich foizi.' },
+      ru:{ eye:'\u0416\u041a Diamond · \u0410\u043b\u043c\u0430\u0442\u044b · ALKZ / Walter', t1:'\u0422\u0435\u043c\u043f \u043c\u043e\u043d\u0442\u0430\u0436\u0430', t2:'\u0444\u0430\u0441\u0430\u0434\u0430', sub:'\u0412\u0435\u043d\u0442\u0444\u0430\u0441\u0430\u0434 — 3 \u044d\u0442\u0430\u043f\u0430, 7 \u0431\u043b\u043e\u043a\u043e\u0432, \u0430\u043b\u044e\u043c\u0438\u043d\u0438\u0435\u0432\u0430\u044f \u043e\u0431\u043b\u0438\u0446\u043e\u0432\u043a\u0430. \u0412\u0441\u0435 \u0446\u0438\u0444\u0440\u044b \u0441\u0447\u0438\u0442\u0430\u044e\u0442\u0441\u044f \u0438\u0437 Google Sheets \u0432 \u0440\u0435\u0430\u043b\u044c\u043d\u043e\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u0438.', overall:'\u0432\u0441\u0435\u0433\u043e \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u043e', total:'\u041e\u0431\u0449\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c', blocks:'\u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0435 \u0431\u043b\u043e\u043a\u0438', matTitle:'\u041c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u044b — \u0441\u0442\u0430\u0434\u0438\u0438', matSub:'Shopdrawing \u2192 \u043c\u043e\u043d\u0442\u0430\u0436 — % \u0441\u0442\u0430\u0434\u0438\u0438 \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u0443.' },
+      tr:{ eye:'Diamond Sitesi · Almat\u0131 · ALKZ / Walter', t1:'Cephe montaj', t2:'temposu', sub:'Giydirme cephe — 3 etap, 7 blok, al\u00fcminyum kaplama. T\u00fcm say\u0131lar Google Sheets\u2019ten ger\u00e7ek zamanl\u0131 hesaplan\u0131r.', overall:'toplam tamamland\u0131', total:'Toplam alan', blocks:'Aktif bloklar', matTitle:'Malzemeler — a\u015famalar', matSub:'Shopdrawing \u2192 montaj — her malzeme i\u00e7in a\u015fama %.' },
+    };
+    const hs = HS[lang]||HS.uz;
+    const matStages=(this.state.materials||[]).filter(m=>{ const c=m.stages&&m.stages.Shopdrawing&&m.stages.Shopdrawing.contract; return c&&c>10; }).map(m=>({
+      label:m.label,
+      contractText:(m.stages.Installation&&m.stages.Installation.contract?Math.round(m.stages.Installation.contract).toLocaleString('ru-RU')+' m\u00b2':''),
+      bars:this.STAGE_ORDER.map((k,i)=>{ const p=m.stages[k]?this.clampPct(m.stages[k].pct):0; return { label:L.stages[i], pctText:p+'%', w:p+'%', color:this.ETAP_COLORS[i%4] }; })
+    }));
+
+    return {
+      t, L, lang, kpis, blocks, materials, pipeline, pipelineAvg:pipelineAvg+'%', pipelineDoneText:pipelineDone+' / '+pipeline.length, modalBlock,
+      heroDash, heroOffset, activeBlocksText, matStages,
+      heroEye:hs.eye, heroT1:hs.t1, heroT2:hs.t2, heroSub2:hs.sub, heroOverallLbl:hs.overall, heroTotalLbl:hs.total, heroBlocksLbl:hs.blocks, matSecTitle:hs.matTitle, matSecSub:hs.matSub,
+      etap:etapView,
+      dayTabs, dailyActive, todayWorks, hasDailyWorks, dailyEmpty, showArchiveNote, archiveSlots, dailyBadge,
+      DL, dailyFileRef:this.dailyFileInput, dailyUploading:this.state.dailyUploading, dailyMsg:this.state.dailyMsg,
+      pickDailyFile:()=>this.pickDailyFile(), onDailyFile:(e)=>this.onDailyFile(e),
+      PH, driveVal, hasDrive, openDrive:()=>this.openDrive(),
+      SY:Object.assign({}, this._syncMsgs(), this._setupMsgs(), { seen: ({tr:'dosya görüldü (içerik/tarih?)', uz:'fayl koʻrildi (ichi/sana?)', ru:'файлов видно (содерж./дата?)'}[lang]), n8nLbl: ({tr:'(tavsiye)', uz:'(tavsiya)', ru:'(рекоменд.)'}[lang]), n8nHelp: ({tr:'Excel’i n8n’e atın — o günlük verileri filtreleyip JSON döndürür, sunum onu okur. API anahtarı gerekmez. Format: {"days":{"2026-07-02":{"works":[{"block":"B3","work":"…","daily":"25 ad"}],"photos":"https://…"}}}', uz:'Excel’ni n8n’ga tashlang — u kunlik ma’lumotni filtrlab JSON qaytaradi, prezentaciya o‘qiydi. API kalit kerak emas. Format: {"days":{"2026-07-02":{"works":[{"block":"B3","work":"…","daily":"25 ad"}],"photos":"https://…"}}}', ru:'Кидайте Excel в n8n — он фильтрует дневные данные и отдаёт JSON, презентация читает. API-ключ не нужен. Формат: {"days":{"2026-07-02":{"works":[{"block":"B3","work":"…","daily":"25 ad"}],"photos":"https://…"}}}'}[lang]) }), driveSyncing:this.state.driveSyncing, notSyncing:!this.state.driveSyncing, driveMsg:this.state.driveMsg, driveSettingsOpen:this.state.driveSettingsOpen,
+      driveSteps: ({ tr:['console.cloud.google.com → giriş','Üstte “New project” → isim → Create','APIs & Services → Library → “Google Drive API” → Enable','Credentials → + Create credentials → API key → kopyala','Drive klasörü → Share → “Anyone with the link” → Viewer','Linki + anahtarı aşağıya yapıştır → senkronize et'], uz:['console.cloud.google.com → kiring','Yuqorida “New project” → nom → Create','APIs & Services → Library → “Google Drive API” → Enable','Credentials → + Create credentials → API key → nusxa oling','Drive papka → Share → “Anyone with the link” → Viewer','Havola + kalitni pastga qoʻying → sinxronlang'], ru:['console.cloud.google.com → войти','Сверху “New project” → имя → Create','APIs & Services → Library → “Google Drive API” → Enable','Credentials → + Create credentials → API key → копировать','Папка Drive → Share → “Anyone with the link” → Viewer','Ссылку + ключ вставьте ниже → синхрон'] }[lang]).map((s,i)=>({ n:(i+1)+'', txt:s })),
+      openConsole:()=>window.open('https://console.cloud.google.com/','_blank','noopener'),
+      driveFolderVal:(this.state.driveCfg||{}).folder||'', driveKeyVal:(this.state.driveCfg||{}).key||'', hasDriveCfg:!!((this.state.driveCfg||{}).folder&&(this.state.driveCfg||{}).key),
+      syncDrive:()=>this.runSync(), toggleDriveSettings:()=>this.toggleDriveSettings(),
+      onDriveFolderInput:(e)=>this.onDriveFolderInput(e), onDriveKeyInput:(e)=>this.onDriveKeyInput(e), onN8nInput:(e)=>this.onN8nInput(e), n8nVal:(this.state.driveCfg||{}).n8n||'',
+      n8nDebtsVal:(this.state.driveCfg||{}).n8nDebts||'', onN8nDebtsInput:(e)=>this.saveDriveCfg2('n8nDebts', e.target.value),
+      driveMsgColor:(this.state.driveMsgColor==='warn'?t.warn:t.muted),
+      usdRateVal:String((this.state.driveCfg||{}).usdRate||'490'), onUsdRateInput:(e)=>this.saveDriveCfg2('usdRate', e.target.value),
+      usdRateLbl:({tr:'USD kuru — 1 $ = ? ₸ (tedarik toplamı için)',uz:'USD kursi — 1 $ = ? ₸ (ta’minot jami uchun)',ru:'Курс USD — 1 $ = ? ₸ (для итога снабжения)'}[this.state.lang]),
+      n8nDebtsLbl:({tr:'BORÇLAR',uz:'QARZLAR',ru:'ДОЛГИ'}[this.state.lang]),
+      n8nDebtsHelp:({tr:'Tedarikçi borçlarını (SAP · Остатка суммы > 0) firma bazında çeker; senkronda otomatik güncellenir.',uz:'Ta’minotchi qarzlarini (SAP · Остатка суммы > 0) firma bo‘yicha oladi; sync bosilganda avtomatik yangilanadi.',ru:'Тянет долги поставщикам (SAP · Остатка суммы > 0) по фирмам; обновляется при синхронизации.'}[this.state.lang]),
+      personnel, showPersonnel, chizma:chizmaView, projectEtaps, masterBlocks, masterTabs,
+      statusChips, personChips, controlRows, controlEmpty, onControlSearch, controlSearchVal:this.state.controlSearch, ctlSummary,
+      teamMembers, teamTrackRef:this.teamTrack,
+      teamVidInputRef:this.teamVidInput,
+      onTeamVidFile:(e)=>{ const f=e.target.files&&e.target.files[0]; if(f&&this._pendingVidMember) this.loadTeamVideo(this._pendingVidMember,f); e.target.value=''; },
+      teamDragOver:(e)=>{ if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.indexOf('Files')>=0) e.preventDefault(); },
+      teamPrev:()=>{ const el=this.teamTrack.current; if(el) el.scrollBy({left:-260,behavior:'smooth'}); },
+      teamNext:()=>{ const el=this.teamTrack.current; if(el) el.scrollBy({left:260,behavior:'smooth'}); },
+      teamEnter:()=>{ this._teamPaused=true; },
+      teamLeave:()=>{ this._teamPaused=false; },
+      hasVideo, noVideo, heroIframe, heroFile, heroSrc,
+      finKpis, finItems, finPaidW, finPaidPctText:finPaidPct+'%', financeUnlocked, financeLocked, financePwVal:this.state.financePw, financePwErr:this.state.financePwErr,
+      supplyDebt, supplyTotals,
+      projRows, projSubs, projGrand, planLocalRows, planLocalTot, planImportRows, planImportTot,
+      onFinancePw:(e)=>this.setState({ financePw:e.target.value, financePwErr:false }),
+      onFinanceSubmit:(e)=>{ e.preventDefault(); if((this.state.financePw||'').trim()===this.FINANCE_PASSWORD) this.setState({ financeUnlocked:true, financePwErr:false }); else this.setState({ financePwErr:true }); },
+      unlockFinance:(e)=>{ if(e&&e.preventDefault) e.preventDefault(); if((this.state.financePw||'').trim()===this.FINANCE_PASSWORD) this.setState({ financeUnlocked:true, financePwErr:false }); else this.setState({ financePwErr:true }); },
+      lockFinance:()=>this.setState({ financeUnlocked:false, financePw:'' }),
+      setHeroVideo:()=>{ if(this.heroVideoInput.current) this.heroVideoInput.current.click(); },
+      videoLinkBtn:({uz:'Havola',ru:'Ссылка',tr:'Bağlantı'})[lang],
+      pasteHeroLink:()=>{ const msg=({uz:'Video havolasini joylang — Google Drive yoki to\u2018g\u2018ridan-to\u2018g\u2018ri .mp4.\n\nGoogle Drive: faylni oching → “Share / Ulashish” → “Anyone with the link” (Viewer) → havolani nusxalab shu yerga joylang. Katta video ham Drive\u2019dan oqib chiqadi.',ru:'Вставьте ссылку на видео — Google Drive или прямой .mp4.\n\nGoogle Drive: откройте файл → «Share» → «Anyone with the link» (Viewer) → скопируйте ссылку. Большое видео тоже потоком с Drive.',tr:'Video bağlantısını yapıştırın — Google Drive veya doğrudan .mp4.\n\nGoogle Drive: dosyayı aç → “Share” → “Anyone with the link” (Viewer) → bağlantıyı kopyala. Büyük video da Drive\u2019dan akış olur.'})[this.state.lang]||''; const u=window.prompt(msg, this.state.heroVideo||''); if(u!=null) this.setHeroVideoUrl(u); },
+      heroVidReady:(e)=>{ const v=e.target; try{ v.muted=true; v.loop=true; v.play&&v.play().catch(()=>{}); }catch(_){} },
+      heroReplay:(e)=>{ const v=e.target; try{ v.currentTime=0; v.muted=true; v.play&&v.play().catch(()=>{}); }catch(_){} },
+      heroVideoInputRef:this.heroVideoInput,
+      onHeroVideoFile:(e)=>{ const f=e.target.files&&e.target.files[0]; if(f) this.loadHeroVideoFile(f); e.target.value=''; },
+      onHeroDrop:(e)=>{ e.preventDefault(); const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0]; if(f&&/^video\//.test(f.type)) this.loadHeroVideoFile(f); },
+      onHeroDragOver:(e)=>{ if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.indexOf('Files')>=0) e.preventDefault(); },
+      clearHeroVideo:()=>this.clearHeroVideo(),
+      hasHeroVideo:!!(this.state.heroVideoFileUrl||this.state.heroVideo),
+      bgAudioRef:this.bgAudio, bgAudioUrl:this.state.bgAudioUrl, bgAudioName:this.state.bgAudioName||L.musicNone,
+      bgPlaying:this.state.bgPlaying, hasBgAudio:!!this.state.bgAudioUrl,
+      bgAudioBad:this.state.bgAudioBad, bgNameColor:this.state.bgAudioBad?t.warn:t.ink,
+      bgAudioInputRef:this.bgAudioInput,
+      pickBgAudio:()=>{ if(this.bgAudioInput.current) this.bgAudioInput.current.click(); },
+      onBgAudioFile:(e)=>{ const f=e.target.files&&e.target.files[0]; if(f) this.loadBgAudioFile(f); e.target.value=''; },
+      onBgDrop:(e)=>{ e.preventDefault(); const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0]; if(f&&/^audio\//.test(f.type)) this.loadBgAudioFile(f); },
+      onBgDragOver:(e)=>{ if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.indexOf('Files')>=0) e.preventDefault(); },
+      toggleBg:()=>this.toggleBg(), clearBgAudio:()=>this.clearBgAudio(),
+      bgPrimary:()=>{ if(this.state.bgAudioUrl) this.toggleBg(); else if(this.bgAudioInput.current) this.bgAudioInput.current.click(); },
+      bgIcon:this.state.bgAudioUrl?(this.state.bgPlaying?'⏸':'▶'):'♪',
+      stageLegend:charts.stageLegend, matGroups:charts.matGroups, trend:charts.trend,
+      overall, daysLeft, delayCount, delayColor:delayCount?t.warn:t.ink,
+      lastUpdated:this.state.lastUpdated, year:new Date().getFullYear(),
+      sheetUrl:this.state.sheetUrl, statusColor, statusMsg,
+      themeIcon:this.state.theme==='deep'?'☀':'☾',
+      heroNumRef:this.heroNumRef,
+      langTrStyle:lang==='tr'?segActive:segIdle, langUzStyle:lang==='uz'?segActive:segIdle, langRuStyle:lang==='ru'?segActive:segIdle,
+      setLangTr:()=>{ this.botSave('df-lang','tr'); this.setState({ lang:'tr' }); }, setLangUz:()=>{ this.botSave('df-lang','uz'); this.setState({ lang:'uz' }); }, setLangRu:()=>{ this.botSave('df-lang','ru'); this.setState({ lang:'ru' }); },
+      toggleTheme:()=>this.setState(s=>({ theme:s.theme==='deep'?'light':'deep' })),
+      present:()=>this.present(), connect:()=>this.connect(),
+      onSheetInput:(e)=>this.setState({ sheetUrl:e.target.value }),
+      closeModal:()=>this.setState({ openBlockId:null }),
+      closeModalBackdrop:(e)=>{ if(e.target===e.currentTarget) this.setState({ openBlockId:null }); },
+      BL, botOpen:this.state.botOpen, botBusy:this.state.botBusy, botMessages, botPendingView, hasPending:botPendingView.length>0, botLogView, hasLog:this.state.botLog.length>0, noLogFlag:this.state.botLog.length===0, botAddGroups, hasAdds:botAddGroups.length>0, botCount, botSources,
+      botThreadRef:this.botThread, botInputRef:this.botInput, botFileRef:this.botPhotoInput,
+      toggleBot:()=>this.toggleBot(), onBotKey:(e)=>this.onBotKey(e), sendBot:()=>this.sendBot(), clearBot:()=>this.clearBot(),
+      applyAllPending:()=>this.applyPending(),
+      botPick:()=>{ if(this.botPhotoInput.current) this.botPhotoInput.current.click(); },
+      onBotFile:(e)=>this.onBotFile(e),
+      onBotDrop:(e)=>this.onBotDrop(e), onBotDragOver:(e)=>{ e.preventDefault(); },
+      notAuthed: !this.state.authed,
+      loginErr: this.state.loginErr,
+      loginUserRef: this.loginUserRef,
+      loginPassRef: this.loginPassRef,
+      submitLogin: ()=>{
+        const u=(this.loginUserRef.current&&this.loginUserRef.current.value||'').trim();
+        const p=(this.loginPassRef.current&&this.loginPassRef.current.value)||'';
+        if(u==='Werzod' && p==='Werzod414!'){
+          try{ sessionStorage.setItem('df-auth','1'); }catch(e){}
+          this.setState({ authed:true, loginErr:false });
+        } else {
+          this.setState({ loginErr:true });
+        }
+      },
+      onLoginKey:(e)=>{ if(e.key==='Enter'){ e.preventDefault();
+        const u=(this.loginUserRef.current&&this.loginUserRef.current.value||'').trim();
+        const p=(this.loginPassRef.current&&this.loginPassRef.current.value)||'';
+        if(u==='Werzod' && p==='Werzod414!'){ try{ sessionStorage.setItem('df-auth','1'); }catch(er){} this.setState({ authed:true, loginErr:false }); }
+        else { this.setState({ loginErr:true }); }
+      } },
+    };
+  }
+}
+
+</script>
+</body>
+</html>
